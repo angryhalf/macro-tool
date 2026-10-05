@@ -28,7 +28,7 @@ def configure_logging(verbose: bool) -> None:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="PySide6 macro tool with screen watchers.")
+    parser = argparse.ArgumentParser(description="PySide6 macro tool with screen-aware stop-trigger/start-trigger triggers.")
     parser.add_argument(
         "--settings",
         type=Path,

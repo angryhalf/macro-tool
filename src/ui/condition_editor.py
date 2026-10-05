@@ -1,7 +1,6 @@
 """Shared editor widget for one :class:`ScreenCondition`.
 
-Used inside the standalone watcher editor and on the macro flow-control
-actions (``wait_for`` / ``pause`` / ``unpause`` steps embed one of these so the
+Used on the macro flow-control actions (``wait_for`` / ``stop_trigger`` / ``start_trigger`` steps embed one of these so the
 screen rule lives on the action itself).  It exposes only the fields relevant
 to the selected mode (template picker for image modes, sensitivity for change
 detection) plus polling options and an optional timeout (shown for *wait_for*
