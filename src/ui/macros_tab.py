@@ -9,7 +9,7 @@ watches the screen for those rules automatically while the macro runs.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (

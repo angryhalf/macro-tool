@@ -32,8 +32,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from app.conditions import ConditionRuntime, ScreenCondition
-from app.settings import CONDITION_ACTION_KINDS, ActionConfig, AppSettings, MacroConfig
+from app.settings import ActionConfig, AppSettings, MacroConfig
 from services.input import HotkeyManager, perform_action
 
 logger = logging.getLogger(__name__)
@@ -115,7 +116,7 @@ class ExecutionToken:
         """Alias used by the UI: actions currently held back by a rule."""
         return self._blocked.is_set()
 
-    def remove_rule(self, condition: "ScreenCondition") -> None:
+    def remove_rule(self, condition: ScreenCondition) -> None:
         """Drop an armed rule (used when a stop-trigger stretch is closed)."""
         with self.rules_lock:
             self.blocked_rules = [e for e in self.blocked_rules if e.get("condition") is not condition]
@@ -159,7 +160,7 @@ class MacroEngine:
         self._hotkeys = HotkeyManager()
         self._settings = AppSettings()
         self._monitor_started = False
-        self.on_state_changed: callable | None = None  # called after start/stop events
+        self.on_state_changed: Callable[[], None] | None = None  # called after start/stop events
 
     # ------------------------------------------------------------------
     # Settings & hotkeys

@@ -1,6 +1,6 @@
-# Compiled and build artifacts
+# Python compiled files
 __pycache__/
 *.pyc
 
-# Editors/IDE files
+# Editor settings (if generated, but usually tracked; here .zed is added so likely should be ignored if it's local config)
 .zed/

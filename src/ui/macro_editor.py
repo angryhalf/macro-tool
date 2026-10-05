@@ -48,7 +48,17 @@ from PySide6.QtWidgets import (
 
 from app.conditions import ScreenCondition
 from app.settings import CONDITION_ACTION_KINDS, ActionConfig, MacroConfig
-from services.input import InputRecorder, current_mouse_position, describe_hotkey, sort_combo
+from services.input import (
+    InputRecorder,
+    current_mouse_position,
+    describe_hotkey,
+    sort_combo,
+)
+from ui.condition_editor import ConditionEditor
+from ui.widgets import HotkeyButton
+
+    sort_combo,
+)
 from ui.condition_editor import ConditionEditor
 from ui.widgets import HotkeyButton
 
@@ -141,7 +151,7 @@ class ActionEditorDialog(QDialog):
         for label, kind in ACTION_KINDS.items():
             self._kind.addItem(label, kind)
         index = self._kind.findData(action.kind)
-        self._kind.setCurrentIndex(index if index >= 0 else 0)
+        self._kind.setCurrentIndex(max(index, 0))
 
         self._pages = QStackedWidget()
         self._page_for_kind: dict[str, QWidget] = {}
@@ -291,7 +301,7 @@ class ActionEditorDialog(QDialog):
         box = QComboBox()
         box.addItems(BUTTONS)
         setattr(self, f"_button_{direction}", box)
-        record = QPushButton(f"Record which button you press…")
+        record = QPushButton("Record which button you press…")
         record.clicked.connect(lambda d=direction, b=box: self._record_button(d, b))
         form = QFormLayout(page)
         form.addRow("Mouse button:", box)

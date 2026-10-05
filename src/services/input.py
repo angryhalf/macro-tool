@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
+from typing import Self
 
 from pynput import keyboard as kb
 from pynput import mouse as ms
@@ -65,7 +66,12 @@ _MODIFIER_ALIASES: dict[kb.Key, kb.Key] = {
 }
 
 
-def _canonical_hotkey_key(key: kb.Key | kb.KeyCode) -> kb.Key | kb.KeyCode | str:
+#: Everything that can appear in a parsed hotkey combination or in the set of
+#: currently pressed keys: named keys, raw character codes, plain characters.
+HotkeyKey = kb.Key | kb.KeyCode | str
+
+
+def _canonical_hotkey_key(key: HotkeyKey) -> HotkeyKey:
     """Normalize side-specific modifiers and character case."""
     if isinstance(key, kb.KeyCode):
         if key.char:
@@ -76,7 +82,7 @@ def _canonical_hotkey_key(key: kb.Key | kb.KeyCode) -> kb.Key | kb.KeyCode | str
     return key
 
 
-def _to_kb_key(name: str) -> kb.Key | str | None:
+def _to_kb_key(name: str) -> HotkeyKey | None:
     """Resolve an action key name ("a", "space", "f5") into a pynput key."""
     if not name:
         return None
@@ -96,7 +102,11 @@ def _to_kb_key(name: str) -> kb.Key | str | None:
 def to_pynput_key(key: kb.Key | kb.KeyCode) -> str:
     """Inverse of :func:`_to_kb_key`: a pynput key event -> canonical name."""
     if isinstance(key, kb.KeyCode):
-        return key.char or f"<{hex(key.vk)}>"
+        if key.char:
+            return key.char
+        if key.vk is not None:
+            return f"<{hex(key.vk)}>"
+        return "<unknown>"
     return key.name
 
 
@@ -175,11 +185,12 @@ def _perform_combo(combo: str) -> None:
         logger.warning("Invalid combo: %r", combo)
         return
     ctrl = kb.Controller()
+    # ``keys`` was validated above, so every entry is a real pynput key.
     pressed = [key for key in keys if key is not None]
     for key in pressed:
-        ctrl.press(key)
+        ctrl.press(key)  # pyright: ignore[reportArgumentType]
     for key in reversed(pressed):
-        ctrl.release(key)
+        ctrl.release(key)  # pyright: ignore[reportArgumentType]
 
 
 def _perform_type(text: str, delay_ms: int) -> None:
@@ -190,8 +201,8 @@ def _perform_type(text: str, delay_ms: int) -> None:
     for char in text:
         try:
             ctrl.type(char)
-        except Exception:
-            logger.warning("Cannot type character %r", char)
+        except Exception as exc:  # noqa: BLE001 - controller errors are not typed
+            logger.warning("Cannot type character %r: %s", char, exc)
         if delay_ms > 0:
             time.sleep(delay_ms / 1000.0)
 
@@ -210,7 +221,7 @@ def _perform_click(button_name: str, *, double: bool, x: int | None, y: int | No
 
 def _perform_drag(action: ActionConfig) -> None:
     """Press at (x, y), move to (amount, duration_ms fields), release."""
-    if None in (action.x, action.y):
+    if action.x is None or action.y is None:
         logger.warning("Drag action missing start position")
         return
     button = _to_ms_button(action.button)
@@ -241,8 +252,8 @@ class HotkeyManager:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._hotkeys: dict[frozenset[kb.Key | str], Callable[[], None]] = {}
-        self._pressed: set[kb.Key | kb.KeyCode | str] = set()
+        self._hotkeys: dict[frozenset[HotkeyKey], Callable[[], None]] = {}
+        self._pressed: set[HotkeyKey] = set()
         self._listener: kb.Listener | None = None
 
     # ------------------------------------------------------------------
@@ -250,7 +261,7 @@ class HotkeyManager:
     # ------------------------------------------------------------------
     def set_hotkeys(self, bindings: Iterable[tuple[str, Callable[[], None]]]) -> None:
         """Replace all registrations with *bindings* ((combo string, callback))."""
-        rebuilt: dict[frozenset[kb.Key | str], Callable[[], None]] = {}
+        rebuilt: dict[frozenset[HotkeyKey], Callable[[], None]] = {}
         for combo, callback in bindings:
             parsed = self.parse_combo(combo)
             if parsed is None:
@@ -276,7 +287,7 @@ class HotkeyManager:
         self._release_modifiers()
 
     @staticmethod
-    def parse_combo(combo: str) -> frozenset[kb.Key | kb.KeyCode | str] | None:
+    def parse_combo(combo: str) -> frozenset[HotkeyKey] | None:
         """Parse ``"ctrl+shift+d"`` into a canonical frozenset usable as a map key."""
         names = [part.strip().lower() for part in combo.split("+") if part.strip()]
         if not names:
@@ -295,7 +306,10 @@ class HotkeyManager:
     # ------------------------------------------------------------------
     def _sync_locked(self) -> None:
         if self._hotkeys and self._listener is None:
-            self._listener = kb.Listener(on_press=self._on_press, on_release=self._on_release)
+            self._listener = kb.Listener(
+                on_press=self._on_press,
+                on_release=self._on_release,
+            )
             self._listener.daemon = True
             self._listener.start()
             logger.info("Hotkey listener started (%d binding(s))", len(self._hotkeys))
@@ -304,13 +318,16 @@ class HotkeyManager:
             listener.stop()
             logger.info("Hotkey listener stopped")
 
-    def _on_press(self, key: kb.Key | kb.KeyCode) -> None:
+    def _on_press(self, key: kb.Key | kb.KeyCode | None) -> bool | None:
+        # pynput may pass ``None`` for unmapable keys; ignore those events.
+        if key is None:
+            return None
         canonical = _canonical_hotkey_key(key)
 
         with self._lock:
             # Ignore operating-system key auto-repeat.
             if canonical in self._pressed:
-                return
+                return None
 
             self._pressed.add(canonical)
 
@@ -322,15 +339,19 @@ class HotkeyManager:
             callback = self._hotkeys.get(matched) if matched is not None else None
 
         if callback is None:
-            return
+            return None
 
         # Run callbacks off the listener thread so a macro can start here
         # without blocking further key events.
         threading.Thread(target=self._fire, args=(callback,), daemon=True).start()
+        return None
 
-    def _on_release(self, key: kb.Key | kb.KeyCode) -> None:
+    def _on_release(self, key: kb.Key | kb.KeyCode | None) -> bool | None:
+        if key is None:
+            return None
         with self._lock:
             self._pressed.discard(_canonical_hotkey_key(key))
+        return None
 
     @staticmethod
     def _fire(callback: Callable[[], None]) -> None:
@@ -345,8 +366,9 @@ class HotkeyManager:
         for key in _MODIFIER_KEYS:
             try:
                 ctrl.release(key)
-            except Exception:
-                pass  # key was not held down
+            except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+                # The key was simply not held down; nothing to release.
+                logger.debug("Ignoring modifier release failure for %s: %s", key, exc)
 
 
 def describe_hotkey(combo: str) -> str:
@@ -408,15 +430,23 @@ class InputRecorder:
         with self._lock:
             return bool(self._listeners)
 
-    def start(self) -> "InputRecorder":
+    def start(self) -> Self:
         """Start both listeners (no-op if already running)."""
         with self._lock:
             if self._listeners:
                 return self
-            keyboard = kb.Listener(
-                on_press=lambda key: self._on_key(key, pressed=True),
-                on_release=lambda key: self._on_key(key, pressed=False),
-            )
+
+            def on_press(key: kb.Key | kb.KeyCode | None) -> bool | None:
+                if key is not None:
+                    self._on_key(key, pressed=True)
+                return None
+
+            def on_release(key: kb.Key | kb.KeyCode | None) -> bool | None:
+                if key is not None:
+                    self._on_key(key, pressed=False)
+                return None
+
+            keyboard = kb.Listener(on_press=on_press, on_release=on_release)
             mouse = ms.Listener(
                 on_move=self._on_move,
                 on_click=self._on_click,
@@ -443,7 +473,7 @@ class InputRecorder:
         if listeners:
             logger.info("Input recorder stopped")
 
-    def __enter__(self) -> "InputRecorder":
+    def __enter__(self) -> Self:
         return self.start()
 
     def __exit__(self, *exc_info: object) -> None:
@@ -490,6 +520,7 @@ class InputRecorder:
 
 
 __all__ = [
+    "HotkeyKey",
     "HotkeyManager",
     "InputRecorder",
     "current_mouse_position",
