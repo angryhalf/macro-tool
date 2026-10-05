@@ -32,8 +32,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from app.conditions import ConditionRuntime, ScreenCondition
-from app.settings import CONDITION_ACTION_KINDS, ActionConfig, AppSettings, MacroConfig
+from app.settings import ActionConfig, AppSettings, MacroConfig
 from services.input import HotkeyManager, perform_action
 
 logger = logging.getLogger(__name__)
@@ -159,7 +160,7 @@ class MacroEngine:
         self._hotkeys = HotkeyManager()
         self._settings = AppSettings()
         self._monitor_started = False
-        self.on_state_changed: callable | None = None  # called after start/stop events
+        self.on_state_changed: Callable[[], None] | None = None  # called after start/stop events
 
     # ------------------------------------------------------------------
     # Settings & hotkeys
