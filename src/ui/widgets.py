@@ -89,7 +89,7 @@ class HotkeyButton(QPushButton):
         else:
             self.setText(self._caption(self._hotkey))
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+    def keyPressEvent(self, event: QKeyEvent) -> None:
         if not self._capturing:
             super().keyPressEvent(event)
             return

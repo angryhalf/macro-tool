@@ -116,7 +116,7 @@ class ExecutionToken:
         """Alias used by the UI: actions currently held back by a rule."""
         return self._blocked.is_set()
 
-    def remove_rule(self, condition: "ScreenCondition") -> None:
+    def remove_rule(self, condition: ScreenCondition) -> None:
         """Drop an armed rule (used when a stop-trigger stretch is closed)."""
         with self.rules_lock:
             self.blocked_rules = [e for e in self.blocked_rules if e.get("condition") is not condition]
