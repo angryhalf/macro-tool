@@ -20,17 +20,17 @@ class ActionConfig:
 
     * ``wait_for`` -- block until a screen condition (stored in ``condition``)
       holds on screen.
-    * ``pause`` / ``unpause`` -- trigger-style flow steps.  The screen is
+    * ``stop_trigger`` / ``start_trigger`` -- trigger-style flow steps.  The screen is
       watched automatically while the macro runs: every action written after
-      a *pause* step is held back while its rule holds on screen (and resumes
-      when it clears); every action after an *unpause* step stays held until
+      a *stop_trigger* step is held back while its rule holds on screen (and resumes
+      when it clears); every action after an *start_trigger* step stays held until
       its rule is met, then runs freely.  The rule lives in the action's
       ``condition`` field.
     """
 
     kind: str = "key"  # key | hold_key | combo | type | move | click | double_click
     #                    mouse_down | mouse_up | drag | scroll | wait
-    #                    wait_for | pause | unpause
+    #                    wait_for | stop_trigger | start_trigger
     key: str = ""  # for key/hold_key actions (e.g. "a", "space", "f1")
     button: str = "left"  # for click/double_click/mouse_down/mouse_up/drag actions
     x: int | None = None  # absolute screen X (mouse actions; drag start)
@@ -39,11 +39,11 @@ class ActionConfig:
     duration_ms: int = 50  # hold time; wait delay; drag end Y
     combo: str = ""  # for combo actions, e.g. "ctrl+shift+d"
     text: str = ""  # for type actions, the literal string to type
-    condition: ScreenCondition | None = None  # for wait_for/pause/unpause actions
+    condition: ScreenCondition | None = None  # for wait_for/stop-trigger/start-trigger actions
 
 
 #: Action kinds that gate execution on a screen condition.
-CONDITION_ACTION_KINDS: frozenset[str] = frozenset({"wait_for", "pause", "unpause"})
+CONDITION_ACTION_KINDS: frozenset[str] = frozenset({"wait_for", "stop_trigger", "start_trigger"})
 
 
 @dataclass(frozen=True)
@@ -51,8 +51,8 @@ class MacroConfig:
     """A named sequence of actions with playback options.
 
     The user turns the macro on and off (run button, hotkey, stop); there is
-    no separate "paused" macro state.  Pausing is expressed *inside the
-    action list* only: ``pause`` and ``unpause`` actions carry a
+    no separate "paused" macro state.  Triggering is expressed *inside the
+    action list* only: ``stop_trigger`` and ``start_trigger`` actions carry a
     :class:`ScreenCondition` and act like triggers that gate the stretch of
     actions written between them -- the screen is watched automatically while
     the macro runs, holding back those actions according to the rules.  A
@@ -100,28 +100,28 @@ def _macro_from_dict(raw: dict[str, Any]) -> MacroConfig:
 
 
 def _migrate_legacy_conditions(raw: dict[str, Any], actions: list[ActionConfig]) -> list[ActionConfig]:
-    """Fold old top-level pause/unpause conditions into the action list.
+    """Fold old top-level stop-trigger/start-trigger conditions into the action list.
 
     Earlier versions stored ``start_condition``/``stop_condition`` (later
     renamed ``pause_condition``/``unpause_condition``) directly on the macro.
     Those semantics are now expressed as *actions*: a ``wait_for`` step at the
-    head of the sequence, and a ``pause``/``unpause`` pair wrapped around it.
+    head of the sequence, and a ``stop_trigger``/``start_trigger`` pair wrapped around it.
     """
-    legacy_pause = _condition_from_dict(raw.get("pause_condition", raw.get("start_condition")))
-    legacy_unpause = _condition_from_dict(raw.get("unpause_condition", raw.get("stop_condition")))
-    if legacy_pause is None and legacy_unpause is None:
+    legacy_stop = _condition_from_dict(raw.get("stop_trigger_condition", raw.get("pause_condition", raw.get("start_condition"))))
+    legacy_start = _condition_from_dict(raw.get("start_trigger_condition", raw.get("unpause_condition", raw.get("stop_condition"))))
+    if legacy_stop is None and legacy_start is None:
         return actions
     if not actions:
         return actions
-    gate = legacy_unpause or legacy_pause
+    gate = legacy_start or legacy_stop
     assert gate is not None
-    prefix = [ActionConfig(kind="wait_for", condition=legacy_pause)] if legacy_pause else []
+    prefix = [ActionConfig(kind="wait_for", condition=legacy_stop)] if legacy_stop else []
     suffix = (
         [
-            ActionConfig(kind="pause", condition=gate),
-            ActionConfig(kind="unpause", condition=gate),
+            ActionConfig(kind="stop_trigger", condition=gate),
+            ActionConfig(kind="start_trigger", condition=gate),
         ]
-        if legacy_unpause
+        if legacy_start
         else []
     )
     return prefix + actions + suffix

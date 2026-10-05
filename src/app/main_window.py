@@ -1,6 +1,6 @@
 """The single application window: tabs for macros and settings.
 
-Pause/unpause screen conditions are set *inside* each macro's action list;
+Stop-trigger/start-trigger screen conditions are set *inside* each macro's action list;
 the macro engine's background monitor watches the screen for them
 automatically while a macro runs -- no separate watcher tab is needed.
 """
@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
         self.macros_tab = MacrosTab(
             self._on_macros_changed,
             self._run_macro,
+            self._stop_macro,
             lambda: self._settings.stop_hotkey,
             engine=self._macro_engine,
         )
@@ -97,7 +98,7 @@ class MainWindow(QMainWindow):
 
         # -- initial state ---------------------------------------------
         # The monitor thread automatically watches the screen for any
-        # pause/unpause conditions defined inside running macros.
+        # stop-trigger/start-trigger conditions defined inside running macros.
         self._macro_engine.start_monitor()
         self._push_settings_to_ui()
         self._apply_to_engines()
@@ -155,7 +156,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Empty macro", f"'{macro.name}' has no actions yet.")
         else:
             stop_key = describe_hotkey(self._settings.stop_hotkey)
-            self._set_status(f"Running '{macro.name}' — press {stop_key} to stop")
+            self._set_status(f"Running '{macro.name}' — press {stop_key} to stop all")
+
+    def _stop_macro(self, macro: MacroConfig) -> None:
+        """Cancel just the selected macro's running sequence (if any)."""
+        if self._macro_engine.stop_macro(macro.name):
+            self._set_status(f"Stopped '{macro.name}'")
+        else:
+            self._set_status(f"'{macro.name}' is not running")
+        self._refresh_status()
 
     # ------------------------------------------------------------------
     # Global settings callbacks
@@ -186,16 +195,11 @@ class MainWindow(QMainWindow):
     # Status
     # ------------------------------------------------------------------
     def _refresh_status(self) -> None:
-        busy = "running" if self._macro_engine.is_busy() else "idle"
-        held = [
-            name
-            for name in self._macro_engine.running_macros()
-            if self._macro_engine.is_macro_gated(name)
-        ]
-        if held:
-            self._set_status(f"{busy} · actions held by a rule: {', '.join(held)}")
+        running = sorted(self._macro_engine.running_macros())
+        if running:
+            self._set_status("running: " + ", ".join(running))
         else:
-            self._set_status(busy)
+            self._set_status("idle")
 
     def _set_status(self, text: str) -> None:
         self.statusBar().showMessage(text)

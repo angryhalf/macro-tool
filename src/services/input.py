@@ -96,13 +96,13 @@ def current_mouse_position() -> tuple[int, int]:
 def perform_action(action: ActionConfig) -> None:
     """Execute a single macro action via pynput (blocking).
 
-    Flow-control kinds (``wait_for``, ``pause``, ``unpause``) are handled by
+    Flow-control kinds (``wait_for``, ``stop_trigger``, ``start_trigger``) are handled by
     :class:`~core.macro_engine.MacroEngine` itself and never reach real input
     synthesis; they are accepted here as no-ops so ad-hoc action lists can be
     played through this function without special-casing.
     """
     kind = action.kind
-    if kind in ("wait_for", "pause", "unpause"):
+    if kind in ("wait_for", "stop_trigger", "start_trigger"):
         return
     if kind in ("key", "hold_key"):
         _perform_key(kind, action.key, action.duration_ms)

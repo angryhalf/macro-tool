@@ -1,4 +1,4 @@
-"""Macro editor: actions, pause/unpause flow steps and input recording.
+"""Macro editor: actions, stop-trigger/start-trigger flow steps and input recording.
 
 * :class:`ActionEditorDialog` -- edit one step of a macro's action list.  On
   top of the keyboard/mouse kinds there are three *flow-control* actions that
@@ -6,9 +6,9 @@
   :mod:`ui.condition_editor`):
 
   - **Wait until** (``wait_for``) blocks until the rule holds on screen.
-  - **Pause when** (``pause``) opens a stretch whose actions are held back
+  - **Stop trigger** (``stop_trigger``) opens a stretch whose actions are held back
     while the rule is present on screen.
-  - **Unpause when** (``unpause``) closes that stretch (and can itself wait
+  - **Start trigger** (``start_trigger``) closes that stretch (and can itself wait
     for its rule before execution continues).
 
   Every action type shows only the fields it needs, and *Record* buttons
@@ -68,8 +68,8 @@ ACTION_KINDS: dict[str, str] = {
     "Scroll": "scroll",
     "Wait": "wait",
     "Wait until (screen)": "wait_for",
-    "Pause when (screen)": "pause",
-    "Unpause when (screen)": "unpause",
+    "Stop trigger (screen)": "stop_trigger",
+    "Start trigger (screen)": "start_trigger",
 }
 
 BUTTONS = ["left", "right", "middle"]
@@ -81,17 +81,17 @@ _CONDITION_HINTS: dict[str, str] = {
         "Execution stops here until this screen event appears; the optional "
         "give-up timeout ends the macro if it never happens."
     ),
-    "pause": (
+    "stop_trigger": (
         "Triggers off every action written after this step while this screen "
         "event is present on screen, and triggers them back on as soon as it "
         "clears (the screen is watched automatically).  Without a rule it "
-        "opens a stretch whose actions stay held until the next 'Unpause "
-        "when' step closes it."
+        "opens a stretch whose actions stay held until the next 'Start "
+        "trigger' step closes it."
     ),
-    "unpause": (
+    "start_trigger": (
         "Triggers on every action written after this step as soon as this "
         "screen event appears; until then those actions stay held.  Without "
-        "a rule it simply releases the hold opened by the last 'Pause when'."
+        "a rule it simply releases the hold opened by the last 'Stop trigger'."
     ),
 }
 
@@ -149,11 +149,11 @@ class ActionEditorDialog(QDialog):
         self._add_page("wait", self._build_wait_page(action))
         # All three flow-control kinds share the single condition page above;
         # it is registered for each kind so the stacked widget can show it.
-        for kind in ("wait_for", "pause", "unpause"):
+        for kind in ("wait_for", "stop_trigger", "start_trigger"):
             self._add_page(kind, self._condition_page)
         # The dict keeps its original (per-kind editor) contract: every kind
         # maps to the same shared editor instance.
-        for kind in ("wait_for", "pause", "unpause"):
+        for kind in ("wait_for", "stop_trigger", "start_trigger"):
             self._condition_editors[kind] = self._shared_condition
 
         self._kind.currentIndexChanged.connect(self._show_page)
@@ -326,7 +326,7 @@ class ActionEditorDialog(QDialog):
         return page
 
     def _build_shared_condition_page(self, action: ActionConfig) -> tuple[QWidget, ConditionEditor]:
-        """Page for the flow-control actions (``wait_for``/``pause``/``unpause``).
+        """Page for the flow-control actions (``wait_for``/``stop_trigger``/``start_trigger``).
 
         All three kinds share this one page -- a single :class:`ConditionEditor`
         so the screen rule lives *on the action itself* and stays intact while
@@ -880,10 +880,10 @@ class MacroEditorDialog(QDialog):
     * **General** -- name, start hotkey, repeat/loops and loop interval.
       The user turns the macro on and off; there is no separate pause state.
     * **Actions** -- an ordered table of steps with add/edit/remove/reorder
-      controls plus a whole-session recorder.  Pause/unpause are *actions*:
-      insert a "Pause when" step to open a gated stretch and an "Unpause
-      when" step to close it -- everything written between them is held back
-      while the pause step's screen rule is present on screen.
+      controls plus a whole-session recorder.  The triggers are *actions*:
+      insert a "Stop trigger" step to open a gated stretch and a "Start
+      trigger" step to close it -- everything written between them is held back
+      while the stop-trigger step's screen rule is present on screen.
     """
 
     def __init__(
@@ -984,8 +984,8 @@ class MacroEditorDialog(QDialog):
             "scroll": ("Scroll", str(action.amount)),
             "wait": ("Wait", f"{action.duration_ms} ms"),
             "wait_for": ("Wait until", cond),
-            "pause": ("Pause when", cond),
-            "unpause": ("Unpause when", cond),
+            "stop_trigger": ("Stop trigger", cond),
+            "start_trigger": ("Start trigger", cond),
         }
         return labels.get(action.kind, (action.kind, ""))
 

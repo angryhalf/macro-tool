@@ -1,10 +1,10 @@
 """Macros tab: list, create, edit, run and stop macro sequences.
 
 The user turns a macro on and off (Run / Stop) -- that is the only macro
-state there is; there is no pause/unpause button and no start-paused option.
-Pause/unpause are ordinary *actions* inside each macro's action list that
-trigger or untrigger other actions based on screen rules; the engine watches
-the screen for those rules automatically while the macro runs.
+state there is; there is no pause button and no start-paused option.
+Stop-trigger/start-trigger are ordinary *actions* inside each macro's action
+list that trigger or untrigger other actions based on screen rules; the engine
+watches the screen for those rules automatically while the macro runs.
 """
 
 from __future__ import annotations
@@ -34,24 +34,24 @@ class MacrosTab(QWidget):
         self,
         on_changed: Callable[[list[MacroConfig]], None],
         on_run: Callable[[MacroConfig], None],
+        on_stop: Callable[[MacroConfig], None],
         stop_hotkey_provider: Callable[[], str] = lambda: "f8",
         engine=None,
         parent: QWidget | None = None,
     ) -> None:
         """*engine* is the :class:`~core.macro_engine.MacroEngine` (optional so
         the tab stays usable in tests without one); it only provides live
-        run-state info shown in the table (e.g. actions held by a rule)."""
+        run-state info shown in the table (e.g. which macros are running)."""
         super().__init__(parent)
         self._on_changed = on_changed
         self._on_run = on_run
+        self._on_stop = on_stop
         self._stop_hotkey_provider = stop_hotkey_provider
         self._engine = engine
         self._macros: list[MacroConfig] = []
 
-        self._table = QTableWidget(0, 5)
-        self._table.setHorizontalHeaderLabels(
-            ["Name", "Hotkey", "Loops", "Actions", "Pause rules"]
-        )
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["Name", "Hotkey", "Loops", "Actions"])
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -73,8 +73,14 @@ class MacrosTab(QWidget):
         run_row = QHBoxLayout()
         self._run_button = QPushButton("▶ Run selected macro")
         self._run_button.clicked.connect(self._run_selected)
+        self._stop_button = QPushButton("■ Stop selected macro")
+        self._stop_button.setStyleSheet(
+            "background-color:#c0392b; color:white; font-weight:bold;"
+        )
+        self._stop_button.clicked.connect(self._stop_selected)
         self._status = QLabel("")
         run_row.addWidget(self._run_button)
+        run_row.addWidget(self._stop_button)
         run_row.addWidget(self._status)
         run_row.addStretch()
 
@@ -147,6 +153,12 @@ class MacrosTab(QWidget):
             self._on_run(self._macros[index])
             self._refresh_run_state()
 
+    def _stop_selected(self) -> None:
+        index = self._selected_index()
+        if index is not None:
+            self._on_stop(self._macros[index])
+            self._refresh_run_state()
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -159,46 +171,28 @@ class MacrosTab(QWidget):
         self._reload_table()
         self._on_changed(self._macros)
 
-    def _flow_summary(self, macro: MacroConfig) -> tuple[int, int]:
-        """Count (flow steps, steps missing their screen rule)."""
-        flow = [a for a in macro.actions if a.kind in ("wait_for", "pause", "unpause")]
-        missing = [
-            a for a in flow
-            if a.condition is None or not a.condition.configured
-        ]
-        return len(flow), len(missing)
-
     def _reload_table(self) -> None:
         self._table.setRowCount(len(self._macros))
         for row, macro in enumerate(self._macros):
             loops = "∞" if macro.repeat else str(macro.loops)
-            flow_count, missing_count = self._flow_summary(macro)
-            rules = f"{flow_count} pause rule(s)" if flow_count else "—"
-            if missing_count:
-                rules += f" ({missing_count} missing!)"
             values = (
                 macro.name,
                 macro.start_hotkey or "—",
                 loops,
                 str(len(macro.actions)),
-                rules,
             )
             for column, value in enumerate(values):
                 self._table.setItem(row, column, QTableWidgetItem(value))
         self._refresh_run_state()
 
     def _refresh_run_state(self) -> None:
-        """Annotate running macros whose actions are currently held back."""
+        """Mark running macros with ▶ and keep their name cell truthful."""
         if self._engine is None:
             return
-        gated = {
-            name
-            for name in self._engine.running_macros()
-            if self._engine.is_macro_gated(name)
-        }
+        running = set(self._engine.running_macros())
         for row, macro in enumerate(self._macros):
-            item = self._table.item(row, 4)
+            item = self._table.item(row, 0)
             if item is None:
                 continue
-            base = item.text().split(" · ")[0]
-            item.setText(f"{base} · ⏸ held" if macro.name in gated else base)
+            base = macro.name
+            item.setText(f"▶ {base}" if macro.name in running else base)

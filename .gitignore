@@ -1,3 +1,9 @@
-# Python cache files
+# Compiled files
 __pycache__/
 *.pyc
+
+# Environment and IDE
+.env
+.env.local
+.vscode/
+.idea/
