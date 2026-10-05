@@ -1,9 +1,11 @@
-"""Screen-condition dataclass shared by macros and background watchers.
+"""Screen-condition dataclass used by macro flow-control actions.
 
 A :class:`ScreenCondition` describes one rule the app reacts to on screen:
 an image appearing or disappearing (template matching) or a region changing
-(pixel-difference detection).  Macros embed up to two of them (a pause gate
-and an unpause requirement); the watcher engine polls standalone ones.
+(pixel-difference detection).  ``wait_for`` / ``pause`` / ``unpause`` macro
+actions each embed one of these; while a macro runs, the engine's background
+monitor evaluates the armed rules automatically -- no separate watcher setup
+is needed.
 """
 
 from __future__ import annotations

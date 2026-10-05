@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +20,12 @@ class ActionConfig:
 
     * ``wait_for`` -- block until a screen condition (stored in ``condition``)
       holds on screen.
-    * ``pause`` / ``unpause`` -- mark where automatic condition-based
-      pausing/unpausing happens: every action written between a *pause* and an
-      *unpause* action is held back while that rule holds on screen (the rule
-      lives in the action's ``condition`` field).
+    * ``pause`` / ``unpause`` -- trigger-style flow steps.  The screen is
+      watched automatically while the macro runs: every action written after
+      a *pause* step is held back while its rule holds on screen (and resumes
+      when it clears); every action after an *unpause* step stays held until
+      its rule is met, then runs freely.  The rule lives in the action's
+      ``condition`` field.
     """
 
     kind: str = "key"  # key | hold_key | combo | type | move | click | double_click
@@ -50,9 +52,10 @@ class MacroConfig:
 
     The user turns the macro on and off (run button, hotkey, stop); nothing
     else starts or stops it.  Pausing is expressed *inside the action list*:
-    ``pause`` and ``unpause`` actions carry a :class:`ScreenCondition`, and
-    while that rule holds on screen every action between the pair is held
-    back.  A ``wait_for`` action simply blocks until its condition holds.
+    ``pause`` and ``unpause`` actions carry a :class:`ScreenCondition` and act
+    like triggers -- the screen is watched automatically while the macro runs,
+    holding back the actions after each step according to its rule.  A
+    ``wait_for`` action simply blocks until its condition holds.
 
     By default a macro begins in the *paused* state -- its actions wait at the
     first boundary until the user presses Unpause (or an ``unpause`` rule
@@ -69,28 +72,10 @@ class MacroConfig:
 
 
 @dataclass(frozen=True)
-class WatcherConfig:
-    """Standalone background trigger kept for advanced use cases.
-
-    Wraps a :class:`~app.conditions.ScreenCondition` that is polled
-    continuously; when it fires, the watcher runs its target macro and/or
-    its own action list.
-    """
-
-    name: str = "New watcher"
-    condition: ScreenCondition = field(default_factory=ScreenCondition)
-    cooldown_ms: int = 1000  # min delay between two triggers
-    auto_start: bool = False
-    target_macro: str = ""  # macro started when the watcher fires
-    actions: tuple[ActionConfig, ...] = ()  # extra actions run after the macro
-
-
-@dataclass(frozen=True)
 class AppSettings:
     """Top-level settings document."""
 
     macros: tuple[MacroConfig, ...] = ()
-    watchers: tuple[WatcherConfig, ...] = ()
     stop_hotkey: str = "f8"
     execution_delay_ms: int = 500  # countdown before a macro starts, to allow focusing the target window
 
@@ -146,20 +131,12 @@ def _migrate_legacy_conditions(raw: dict[str, Any], actions: list[ActionConfig])
     return prefix + actions + suffix
 
 
-def _watcher_from_dict(raw: dict[str, Any]) -> WatcherConfig:
-    skip = {"actions", "condition"}
-    known = {k: v for k, v in raw.items() if k in WatcherConfig.__dataclass_fields__ and k not in skip}
-    condition = _condition_from_dict(raw.get("condition")) or ScreenCondition()
-    return WatcherConfig(condition=condition, actions=tuple(_action_from_dict(a) for a in raw.get("actions", [])), **known)
-
-
 def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> AppSettings:
     """Load settings from JSON, falling back to defaults on any problem."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return AppSettings(
             macros=tuple(_macro_from_dict(m) for m in raw.get("macros", [])),
-            watchers=tuple(_watcher_from_dict(w) for w in raw.get("watchers", [])),
             stop_hotkey=raw.get("stop_hotkey", "f8"),
             execution_delay_ms=int(raw.get("execution_delay_ms", 500)),
         )
@@ -172,7 +149,6 @@ def save_settings(settings: AppSettings, path: Path = DEFAULT_SETTINGS_PATH) -> 
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "macros": [_to_plain(m) for m in settings.macros],
-        "watchers": [_to_plain(w) for w in settings.watchers],
         "stop_hotkey": settings.stop_hotkey,
         "execution_delay_ms": settings.execution_delay_ms,
     }
@@ -200,7 +176,4 @@ def _to_plain(obj: Any) -> Any:
 def rename_in_settings(settings: AppSettings, old_name: str, new_name: str) -> AppSettings:
     """Return settings with all references to a macro name updated."""
     macros = tuple(replace(m, name=new_name) if m.name == old_name else m for m in settings.macros)
-    watchers = tuple(
-        replace(w, target_macro=new_name) if w.target_macro == old_name else w for w in settings.watchers
-    )
-    return replace(settings, macros=macros, watchers=watchers)
+    return replace(settings, macros=macros)
