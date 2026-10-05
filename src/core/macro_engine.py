@@ -25,7 +25,7 @@ import logging
 import threading
 import time
 from app.conditions import ConditionRuntime, ScreenCondition
-from app.settings import ActionConfig, AppSettings, MacroConfig
+from app.settings import CONDITION_ACTION_KINDS, ActionConfig, AppSettings, MacroConfig
 from services.input import HotkeyManager, perform_action
 
 logger = logging.getLogger(__name__)
@@ -44,19 +44,22 @@ class ExecutionToken:
 
     def __init__(self) -> None:
         self._cancelled = threading.Event()
-        self._manual = threading.Event()
-        self._gate = threading.Event()
+        self._released = threading.Event()  # set => not manually paused
+        self._gate_open = threading.Event()  # set => not gated; starts closed
+        self._gate_open.set()
         # Rule currently gating execution (set by the engine's monitor).
         self.condition: ScreenCondition | None = None
         # Wall-clock cadence for the monitor thread's polls of *condition*.
         self.next_poll_mono: float = 0.0
+        # True once the user has pressed Unpause at least while this macro ran.
+        self.user_released = False
 
     # -- cancellation --------------------------------------------------
     def cancel(self) -> None:
         self._cancelled.set()
         # Never leave a paused sequence hanging after cancellation.
-        self._manual.clear()
-        self._gate.clear()
+        self._released.set()
+        self._gate_open.set()
 
     @property
     def cancelled(self) -> bool:
@@ -65,38 +68,40 @@ class ExecutionToken:
     # -- manual (user) pause --------------------------------------------
     def set_manual_pause(self, paused: bool) -> None:
         if paused:
-            self._manual.set()
+            self._released.clear()
         else:
-            self._manual.clear()
+            self.user_released = True
+            self._released.set()
 
     @property
     def manually_paused(self) -> bool:
-        return self._manual.is_set()
+        return not self._released.is_set()
 
     # -- conditional (screen-rule) gate ---------------------------------
     def set_gate(self, active: bool) -> None:
         """Engage/release the ``pause``/``unpause`` gate around a stretch."""
         if active:
-            self._gate.set()
+            self._gate_open.clear()
         else:
-            self._gate.clear()
+            self._gate_open.set()
 
     @property
     def gated(self) -> bool:
-        return self._gate.is_set()
+        return not self._gate_open.is_set()
 
     # -- combined --------------------------------------------------------
     def pause(self) -> None:
         """Request that the sequence hold before its next action."""
-        self._manual.set()
+        self._released.clear()
 
     def unpause(self) -> None:
         """Let a paused sequence continue (manual layer only)."""
-        self._manual.clear()
+        self.user_released = True
+        self._released.set()
 
     @property
     def paused(self) -> bool:
-        return self._manual.is_set() or self._gate.is_set()
+        return not self._released.is_set() or not self._gate_open.is_set()
 
     def wait_if_paused(self) -> None:
         """Block while held (manually or by the gate); returns when released."""
@@ -204,7 +209,7 @@ class MacroEngine:
                 logger.warning("Macro '%s': %s action has no usable condition", macro.name, action.kind)
         token = ExecutionToken()
         if start_paused if start_paused is not None else macro.start_paused:
-            token.pause()
+            token.pause()  # manual layer: user must press Unpause to begin
         thread = threading.Thread(
             target=self._run_macro,
             args=(macro, token, initial_delay_s),
@@ -300,7 +305,7 @@ class MacroEngine:
                 token.sleep(initial_delay_s)
             loops = 0
             while not token.cancelled:
-                if not self._run_actions(macro.actions, token):
+                if not self._run_actions(macro.actions, token, evaluate_gates=True):
                     break
                 loops += 1
                 if not macro.repeat and loops >= max(1, macro.loops):
@@ -320,11 +325,20 @@ class MacroEngine:
     def _run_actions(self, actions: tuple[ActionConfig, ...], token: ExecutionToken) -> bool:
         """Execute one pass of *actions*; False when the pass ended early.
 
-        ``pause``/``unpause`` steps are checkpoints that switch execution into
-        a gated stretch: between a ``pause`` and its matching ``unpause`` the
-        actions are held back whenever the step's screen rule holds; outside
-        such a stretch nothing gates them.  A ``pause`` without a rule simply
-        waits for the user to press Unpause.
+        ``pause``/``unpause`` steps form a bracket around a stretch of the
+        sequence:
+
+        * reaching a **pause** step arms its screen rule and engages the gate
+          if the rule is on screen right now; while the rule holds, every
+          action inside the stretch is held back and they resume as soon as
+          it clears (the engine's monitor flips the gate).  A pause step
+          without a rule simply waits for the user to press Unpause.
+        * reaching an **unpause** step closes the bracket; if that step carries
+          its own rule, execution stays held until the rule holds on screen,
+          then runs freely until the next ``pause``.
+
+        Normal actions call :meth:`ExecutionToken.wait_if_paused` first, so
+        anything written between the pair pauses/unpauses with the rule.
         """
         index = 0
         total = len(actions)
@@ -337,37 +351,45 @@ class MacroEngine:
                 if not self._await_condition(action.condition, token):
                     return False
             elif kind == "pause":
-                # Enter the gated stretch and hold here until it is allowed
-                # to move on (rule clears / user unpauses).
-                token.condition = action.condition
-                token.set_gate(True)
-                if not self._hold_at_checkpoint(token):
+                usable = action.condition is not None and action.condition.configured
+                token.condition = action.condition if usable else None
+                if usable:
+                    # Rule armed: gate follows the screen from here on.
+                    holding = self._evaluate_once(action.condition)
+                    token.set_gate(holding)
+                    if holding:
+                        logger.info("Macro paused at step %d/%d: %s", index + 1, total, action.condition.description)
+                else:
+                    token.set_gate(True)  # no rule: wait for the user
+                    logger.info("Macro paused at step %d/%d: waiting for user unpause", index + 1, total)
+                token.wait_if_paused()
+                if token.cancelled:
                     return False
             elif kind == "unpause":
                 # Leave the gated stretch; with a rule attached, stay held
                 # until that rule holds on screen, then run freely.
-                token.condition = action.condition
-                token.set_gate(False)
-                if not self._hold_at_checkpoint(token):
-                    return False
+                if action.condition is not None and action.condition.configured:
+                    if not self._await_condition(action.condition, token):
+                        return False
                 token.condition = None
+                token.set_gate(False)
             else:
-                token.wait_if_paused()  # never fire actions while a rule holds
+                token.wait_if_paused()  # never fire actions while paused
                 if token.cancelled:
                     return False
                 perform_action(action)
             index += 1
         return True
 
-    def _hold_at_checkpoint(self, token: ExecutionToken) -> bool:
-        """Block at a pause/unpause checkpoint until the gate opens.
-
-        Returns True when execution may continue, False when cancelled.  The
-        engine's polling monitor releases the gate as soon as the attached
-        rule says so; a checkpoint without a rule waits for the user.
-        """
-        token.wait_if_paused()
-        return not token.cancelled
+    @staticmethod
+    def _evaluate_once(condition: ScreenCondition) -> bool:
+        """One synchronous screen check; False on any failure."""
+        runtime = ConditionRuntime.create(condition)
+        try:
+            return bool(runtime.evaluate())
+        except Exception:  # pragma: no cover - transient capture failures
+            logger.exception("Screen-condition check failed (%s)", condition.description)
+            return False
 
     # ------------------------------------------------------------------
     # Condition helpers
@@ -405,35 +427,46 @@ class MacroEngine:
 
     def _monitor_loop(self) -> None:
         """Flip each macro's conditional gate as its screen rule comes and goes."""
+        last_notify = 0.0
         while True:
+            changed = False
             for token in self.running_macros().values():
                 if token.cancelled:
                     continue
-                self._monitor_token(token)
-            time.sleep(0.1)
+                if self._monitor_token(token):
+                    changed = True
+            if changed and time.monotonic() - last_notify > 0.4:
+                last_notify = time.monotonic()
+                self._notify()  # keep the UI's pause buttons truthful
+            time.sleep(0.05)
 
     @staticmethod
-    def _monitor_token(token: ExecutionToken) -> None:
-        """Re-evaluate one token's current rule and open/close its gate."""
+    def _monitor_token(token: ExecutionToken) -> bool:
+        """Re-evaluate one token's armed rule; returns True when the gate flipped.
+
+        While a ``pause`` bracket is open the rule *pauses* the stretch: the
+        actions inside it are held back whenever the rule holds on screen and
+        released as soon as it clears.  Outside a bracket (gate open) the same
+        rule *arms* the pause: execution stops at the next action boundary as
+        soon as the rule appears, so the macro reacts without waiting for the
+        sequence to reach the ``pause`` step again.
+        """
         condition = token.condition
         if condition is None or not condition.configured:
-            return  # manual-only pause: only the user can release it
-        interval_s = max(condition.poll_interval_ms, 10) / 1000.0
-        now = time.monotonic()
-        if now < token.next_poll_mono:
-            return
-        token.next_poll_mono = now + interval_s
+            return False
         runtime = ConditionRuntime.create(condition)
         try:
             holding = runtime.evaluate()
         except Exception:  # pragma: no cover - transient capture failures
             logger.exception("Screen-condition check failed (%s)", condition.description)
-            return
+            return False
         if token.gated:
             if not holding:
                 logger.info("Unpausing actions: %s cleared", condition.description)
                 token.set_gate(False)
-                token.condition = None
+                return True
         elif holding:
-            logger.info("Pausing actions: %s", condition.description)
+            logger.info("Pausing actions: %s appeared", condition.description)
             token.set_gate(True)
+            return True
+        return False
