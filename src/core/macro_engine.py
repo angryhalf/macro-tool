@@ -45,14 +45,11 @@ class ExecutionToken:
     def __init__(self) -> None:
         self._cancelled = threading.Event()
         self._released = threading.Event()  # set => not manually paused
-        self._gate_open = threading.Event()  # set => not gated; starts closed
+        self._released.set()
+        self._gate_open = threading.Event()  # set => not gated by a pause rule
         self._gate_open.set()
         # Rule currently gating execution (set by the engine's monitor).
         self.condition: ScreenCondition | None = None
-        # Wall-clock cadence for the monitor thread's polls of *condition*.
-        self.next_poll_mono: float = 0.0
-        # True once the user has pressed Unpause at least while this macro ran.
-        self.user_released = False
 
     # -- cancellation --------------------------------------------------
     def cancel(self) -> None:
@@ -70,7 +67,6 @@ class ExecutionToken:
         if paused:
             self._released.clear()
         else:
-            self.user_released = True
             self._released.set()
 
     @property
@@ -96,7 +92,6 @@ class ExecutionToken:
 
     def unpause(self) -> None:
         """Let a paused sequence continue (manual layer only)."""
-        self.user_released = True
         self._released.set()
 
     @property
@@ -305,7 +300,7 @@ class MacroEngine:
                 token.sleep(initial_delay_s)
             loops = 0
             while not token.cancelled:
-                if not self._run_actions(macro.actions, token, evaluate_gates=True):
+                if not self._run_actions(macro.actions, token):
                     break
                 loops += 1
                 if not macro.repeat and loops >= max(1, macro.loops):
@@ -328,17 +323,18 @@ class MacroEngine:
         ``pause``/``unpause`` steps form a bracket around a stretch of the
         sequence:
 
-        * reaching a **pause** step arms its screen rule and engages the gate
-          if the rule is on screen right now; while the rule holds, every
-          action inside the stretch is held back and they resume as soon as
-          it clears (the engine's monitor flips the gate).  A pause step
-          without a rule simply waits for the user to press Unpause.
+        * reaching a **pause** step opens the bracket and arms its screen
+          rule; from here on the gate follows the screen -- while the rule
+          holds, every action inside the stretch is held back and they resume
+          as soon as it clears (the engine's monitor flips the gate).  A pause
+          step without a rule simply waits for the user to press Unpause.
         * reaching an **unpause** step closes the bracket; if that step carries
           its own rule, execution stays held until the rule holds on screen,
           then runs freely until the next ``pause``.
 
         Normal actions call :meth:`ExecutionToken.wait_if_paused` first, so
         anything written between the pair pauses/unpauses with the rule.
+        Outside the bracket the armed rule no longer applies.
         """
         index = 0
         total = len(actions)
@@ -351,26 +347,34 @@ class MacroEngine:
                 if not self._await_condition(action.condition, token):
                     return False
             elif kind == "pause":
+                # Open a gated stretch: while the pause rule holds on screen,
+                # every action inside the stretch is held back (the monitor
+                # flips the gate as the rule comes and goes).  A pause step
+                # without a rule simply waits for the user to press Unpause.
                 usable = action.condition is not None and action.condition.configured
                 token.condition = action.condition if usable else None
                 if usable:
-                    # Rule armed: gate follows the screen from here on.
                     holding = self._evaluate_once(action.condition)
                     token.set_gate(holding)
                     if holding:
-                        logger.info("Macro paused at step %d/%d: %s", index + 1, total, action.condition.description)
+                        logger.info(
+                            "Pause engaged at step %d/%d: %s", index + 1, total, action.condition.description
+                        )
                 else:
-                    token.set_gate(True)  # no rule: wait for the user
-                    logger.info("Macro paused at step %d/%d: waiting for user unpause", index + 1, total)
-                token.wait_if_paused()
-                if token.cancelled:
-                    return False
+                    # No rule: hold the *gate* until the user presses Unpause
+                    # (the manual layer is left alone so a later manual Pause
+                    # toggle still reads correctly).
+                    token.set_gate(True)
+                    logger.info("Paused at step %d/%d: waiting for user unpause", index + 1, total)
             elif kind == "unpause":
-                # Leave the gated stretch; with a rule attached, stay held
-                # until that rule holds on screen, then run freely.
+                # Close the gated stretch.  With a rule attached, execution
+                # stays held until that rule appears on screen; otherwise the
+                # stretch simply ends here.
                 if action.condition is not None and action.condition.configured:
                     if not self._await_condition(action.condition, token):
                         return False
+                if token.gated:
+                    logger.info("Pause released at step %d/%d", index + 1, total)
                 token.condition = None
                 token.set_gate(False)
             else:
