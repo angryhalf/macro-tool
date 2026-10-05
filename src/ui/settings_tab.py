@@ -14,8 +14,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.app.settings import AppSettings
-from src.ui.widgets import HotkeyButton
+from app.settings import AppSettings
+from ui.widgets import HotkeyButton
 
 
 class SettingsTab(QWidget):

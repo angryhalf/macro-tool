@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from src.app.main_window import MainWindow
+from app.main_window import MainWindow
 
 LOG_PATH = Path("logs") / "macro.log"
 

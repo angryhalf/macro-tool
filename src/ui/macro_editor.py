@@ -19,9 +19,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.app.settings import ActionConfig, MacroConfig
-from src.services.input import current_mouse_position
-from src.ui.widgets import HotkeyButton
+from app.settings import ActionConfig, MacroConfig
+from services.input import current_mouse_position
+from ui.widgets import HotkeyButton
 
 ACTION_KINDS = {
     "Press key": "key",

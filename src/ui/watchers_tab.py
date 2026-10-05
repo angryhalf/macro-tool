@@ -24,9 +24,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.app.settings import WatcherConfig
-from src.ui.macro_editor import ActionEditorDialog
-from src.ui.widgets import RegionPreviewWidget, crop_and_save_template
+from app.settings import WatcherConfig
+from ui.macro_editor import ActionEditorDialog
+from ui.widgets import RegionPreviewWidget, crop_and_save_template
 
 MODE_LABELS = {
     "Image appears": "image_found",
@@ -228,7 +228,7 @@ class WatcherEditorDialog(QWidget):
             self.template_label.setText(Path(path).name)
 
     def _pick_region(self) -> None:
-        from src.services.region_picker import RegionPickerDialog
+        from services.region_picker import RegionPickerDialog
 
         rect = RegionPickerDialog.pick(self)
         if rect is not None:

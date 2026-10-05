@@ -10,8 +10,8 @@ from __future__ import annotations
 import logging
 import threading
 
-from src.app.settings import ActionConfig, AppSettings, MacroConfig
-from src.services.input import HotkeyManager, perform_action
+from app.settings import ActionConfig, AppSettings, MacroConfig
+from services.input import HotkeyManager, perform_action
 
 logger = logging.getLogger(__name__)
 
