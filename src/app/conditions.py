@@ -65,7 +65,7 @@ class ConditionRuntime:
     deadline_mono: float = field(default=0.0)
 
     @classmethod
-    def create(cls, condition: ScreenCondition, timeout_s: float = 0.0) -> "ConditionRuntime":
+    def create(cls, condition: ScreenCondition, timeout_s: float = 0.0) -> ConditionRuntime:
         """Wrap *condition*, arming an optional wall-clock deadline."""
         from core.screen_watch import ChangeDetector  # local import: avoid cycles
 

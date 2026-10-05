@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 
 from pynput import keyboard as kb
 from pynput import mouse as ms
@@ -408,7 +408,7 @@ class InputRecorder:
         with self._lock:
             return bool(self._listeners)
 
-    def start(self) -> "InputRecorder":
+    def start(self) -> InputRecorder:
         """Start both listeners (no-op if already running)."""
         with self._lock:
             if self._listeners:
@@ -443,7 +443,7 @@ class InputRecorder:
         if listeners:
             logger.info("Input recorder stopped")
 
-    def __enter__(self) -> "InputRecorder":
+    def __enter__(self) -> InputRecorder:
         return self.start()
 
     def __exit__(self, *exc_info: object) -> None:

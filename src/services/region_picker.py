@@ -46,7 +46,7 @@ class _RubberBandCanvas(QWidget):
         self.update()
 
     # -- painting -----------------------------------------------------
-    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         if not self._image.isNull():
             painter.drawImage(0, 0, self._image)
@@ -68,18 +68,18 @@ class _RubberBandCanvas(QWidget):
             )
 
     # -- mouse --------------------------------------------------------
-    def mousePressEvent(self, event) -> None:  # noqa: N802
+    def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self._origin = event.position().toPoint()
             self._current = QRect(self._origin, self._origin)
             self.update()
 
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+    def mouseMoveEvent(self, event) -> None:
         if self._origin is not None:
             self._current = QRect(self._origin, event.position().toPoint()).normalized()
             self.update()
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+    def mouseReleaseEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton or self._origin is None:
             return
         self._origin = None
@@ -93,7 +93,7 @@ class _RubberBandCanvas(QWidget):
             self.update()
 
     # -- keyboard -----------------------------------------------------
-    def keyPressEvent(self, event) -> None:  # noqa: N802
+    def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
             self.selection_cancelled.emit()
 
@@ -132,7 +132,7 @@ class RegionPickerDialog(QDialog):
         self.raise_()
 
     # -- live background ------------------------------------------------
-    def showEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+    def showEvent(self, event) -> None:
         """Grab the desktop *after* the window exists, then hand focus to the canvas."""
         super().showEvent(event)
         image, origin = self._grab_virtual_desktop()
