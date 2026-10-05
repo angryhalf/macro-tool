@@ -1,10 +1,11 @@
 """Shared editor widget for one :class:`ScreenCondition`.
 
-Used three times inside the app: as a macro's *pause condition*, as a macro's
-*unpause condition*, and inside the standalone watcher editor.  It exposes
-only the fields relevant to the selected mode (template picker for image
-modes, sensitivity for change detection) plus polling options and an optional
-timeout (used by the pause condition's initial wait).
+Used inside the standalone watcher editor and on the macro flow-control
+actions (``wait_for`` / ``pause`` / ``unpause`` steps embed one of these so the
+screen rule lives on the action itself).  It exposes only the fields relevant
+to the selected mode (template picker for image modes, sensitivity for change
+detection) plus polling options and an optional timeout (shown for *wait_for*
+steps, which can give up waiting after a while).
 """
 
 from __future__ import annotations

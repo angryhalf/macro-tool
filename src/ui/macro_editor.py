@@ -930,8 +930,6 @@ class MacroEditorDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(meta_box)
-        layout.addWidget(pause_box)
-        layout.addWidget(unpause_box)
         layout.addWidget(actions_box, 1)
         layout.addWidget(buttons)
 
@@ -945,6 +943,7 @@ class MacroEditorDialog(QDialog):
     def describe(action: ActionConfig) -> tuple[str, str]:
         """Human-readable (type, details) pair for the action table."""
         where = "" if action.x is None else f" at ({action.x}, {action.y})"
+        cond = MacroEditorDialog._describe_condition(action)
         labels = {
             "key": ("Press key", action.key),
             "hold_key": ("Hold key", f"{action.key} for {action.duration_ms} ms"),
@@ -961,8 +960,22 @@ class MacroEditorDialog(QDialog):
             ),
             "scroll": ("Scroll", str(action.amount)),
             "wait": ("Wait", f"{action.duration_ms} ms"),
+            "wait_for": ("Wait until", cond),
+            "pause": ("Pause when", cond),
+            "unpause": ("Unpause when", cond),
         }
         return labels.get(action.kind, (action.kind, ""))
+
+    @staticmethod
+    def _describe_condition(action: ActionConfig) -> str:
+        """Short summary of a flow action's screen rule for the table."""
+        condition = action.condition
+        if condition is None or not condition.configured:
+            return "no rule configured"
+        parts = [condition.description]
+        if action.duration_ms:
+            parts.append(f"gives up after {action.duration_ms} ms")
+        return ", ".join(part for part in parts if part) or "rule configured"
 
     def _reload_table(self) -> None:
         self._table.setRowCount(len(self._actions))
@@ -1021,27 +1034,5 @@ class MacroEditorDialog(QDialog):
             loops=self._loops.value(),
             interval_ms=self._interval.value(),
             actions=tuple(self._actions),
-            pause_condition=self._build_pause_condition(),
-            unpause_condition=self._build_unpause_condition(),
+            start_paused=self._start_paused.isChecked(),
         )
-
-    def _build_pause_condition(self):
-        """Return the enabled pause condition, or ``None`` when disabled/empty."""
-        if not self._pause_enabled.isChecked():
-            return None
-        condition = self._pause_editor.build()
-        return condition if condition.configured else None
-
-    def _build_unpause_condition(self):
-        """Return the enabled unpause condition, or ``None`` when disabled/empty.
-
-        The unpause rule only makes sense together with a pause condition --
-        without one there is nothing to hold execution back -- so it is
-        dropped when the pause condition is off.
-        """
-        if not self._unpause_enabled.isChecked():
-            return None
-        if not self._pause_enabled.isChecked():
-            return None
-        condition = self._unpause_editor.build()
-        return condition if condition.configured else None

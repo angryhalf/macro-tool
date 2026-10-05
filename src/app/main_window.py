@@ -65,7 +65,10 @@ class MainWindow(QMainWindow):
 
         # -- tabs ------------------------------------------------------
         self.macros_tab = MacrosTab(
-            self._on_macros_changed, self._run_macro, lambda: self._settings.stop_hotkey
+            self._on_macros_changed,
+            self._run_macro,
+            lambda: self._settings.stop_hotkey,
+            engine=self._macro_engine,
         )
         self.watchers_tab = WatchersTab(
             self._on_watchers_changed, self._start_watcher, self._stop_watcher, self._macro_names
@@ -99,6 +102,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         # -- initial state ---------------------------------------------
+        self._macro_engine.start_monitor()
         self._push_settings_to_ui()
         self._apply_to_engines(start_auto_watchers=True)
         self._refresh_status()
@@ -162,7 +166,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Empty macro", f"'{macro.name}' has no actions yet.")
         else:
             stop_key = describe_hotkey(self._settings.stop_hotkey)
-            self._set_status(f"Running '{macro.name}' — press {stop_key} to stop")
+            if macro.start_paused:
+                self._set_status(
+                    f"'{macro.name}' started PAUSED — press Unpause (or {stop_key} to stop)"
+                )
+            else:
+                self._set_status(f"Running '{macro.name}' — press {stop_key} to stop")
 
     # ------------------------------------------------------------------
     # Watcher tab callbacks
