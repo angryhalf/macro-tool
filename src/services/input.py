@@ -50,6 +50,31 @@ MODIFIER_NAMES: frozenset[str] = frozenset(
     {"ctrl", "ctrl_l", "ctrl_r", "alt", "alt_l", "alt_r", "shift", "shift_l", "shift_r", "cmd", "cmd_r"}
 )
 
+#: Side-specific modifier keys mapped onto their generic alias so that a
+#: parsed combo like ``ctrl+shift+d`` matches whichever physical keys the
+#: user actually presses (e.g. ``ctrl_l``).
+_MODIFIER_ALIASES: dict[kb.Key, kb.Key] = {
+    kb.Key.ctrl_l: kb.Key.ctrl,
+    kb.Key.ctrl_r: kb.Key.ctrl,
+    kb.Key.alt_l: kb.Key.alt,
+    kb.Key.alt_r: kb.Key.alt,
+    kb.Key.shift_l: kb.Key.shift,
+    kb.Key.shift_r: kb.Key.shift,
+    kb.Key.cmd: kb.Key.cmd,
+    kb.Key.cmd_r: kb.Key.cmd,
+}
+
+
+def _canonical_hotkey_key(key: kb.Key | kb.KeyCode) -> kb.Key | kb.KeyCode | str:
+    """Normalize side-specific modifiers and character case."""
+    if isinstance(key, kb.KeyCode):
+        if key.char:
+            return key.char.lower()
+        return key
+    if isinstance(key, kb.Key):
+        return _MODIFIER_ALIASES.get(key, key)
+    return key
+
 
 def _to_kb_key(name: str) -> kb.Key | str | None:
     """Resolve an action key name ("a", "space", "f5") into a pynput key."""
@@ -217,6 +242,7 @@ class HotkeyManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._hotkeys: dict[frozenset[kb.Key | str], Callable[[], None]] = {}
+        self._pressed: set[kb.Key | kb.KeyCode | str] = set()
         self._listener: kb.Listener | None = None
 
     # ------------------------------------------------------------------
@@ -236,28 +262,33 @@ class HotkeyManager:
 
         with self._lock:
             self._hotkeys = rebuilt
+            self._pressed.clear()
             self._sync_locked()
 
     def stop(self) -> None:
         """Stop the listener and release any held modifier keys."""
         with self._lock:
             self._hotkeys.clear()
+            self._pressed.clear()
             listener, self._listener = self._listener, None
         if listener is not None:
             listener.stop()
         self._release_modifiers()
 
     @staticmethod
-    def parse_combo(combo: str) -> frozenset[kb.Key | str] | None:
-        """Parse ``"ctrl+shift+d"`` into a frozenset usable as a map key."""
+    def parse_combo(combo: str) -> frozenset[kb.Key | kb.KeyCode | str] | None:
+        """Parse ``"ctrl+shift+d"`` into a canonical frozenset usable as a map key."""
         names = [part.strip().lower() for part in combo.split("+") if part.strip()]
         if not names:
             return None
+
         keys = [_to_kb_key(name) for name in names]
         if any(key is None for key in keys):
             logger.warning("Invalid hotkey '%s'", combo)
             return None
-        return frozenset(keys)  # type: ignore[arg-type]
+
+        canonical = [_canonical_hotkey_key(key) for key in keys if key is not None]
+        return frozenset(canonical)
 
     # ------------------------------------------------------------------
     # Internals
@@ -274,16 +305,32 @@ class HotkeyManager:
             logger.info("Hotkey listener stopped")
 
     def _on_press(self, key: kb.Key | kb.KeyCode) -> None:
+        canonical = _canonical_hotkey_key(key)
+
         with self._lock:
-            callback = self._hotkeys.get(frozenset({key}))
+            # Ignore operating-system key auto-repeat.
+            if canonical in self._pressed:
+                return
+
+            self._pressed.add(canonical)
+
+            matched = max(
+                (combo for combo in self._hotkeys if combo.issubset(self._pressed)),
+                key=len,
+                default=None,
+            )
+            callback = self._hotkeys.get(matched) if matched is not None else None
+
         if callback is None:
             return
+
         # Run callbacks off the listener thread so a macro can start here
         # without blocking further key events.
         threading.Thread(target=self._fire, args=(callback,), daemon=True).start()
 
     def _on_release(self, key: kb.Key | kb.KeyCode) -> None:
-        del key  # combos fire on press; nothing to track on release.
+        with self._lock:
+            self._pressed.discard(_canonical_hotkey_key(key))
 
     @staticmethod
     def _fire(callback: Callable[[], None]) -> None:

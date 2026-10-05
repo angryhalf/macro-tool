@@ -9,7 +9,14 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from app.main_window import MainWindow
+# The project uses absolute imports (`app.*`, `core.*`, ...).  Insert the
+# package directory on ``sys.path`` so both `python src/main.py` and
+# `python -m src.main` work as documented entry points.
+_SRC_DIR = Path(__file__).resolve().parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+from app.main_window import MainWindow  # noqa: E402
 
 LOG_PATH = Path("logs") / "macro.log"
 

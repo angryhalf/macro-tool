@@ -1,7 +1,2 @@
-# Compiled files
 __pycache__/
 *.pyc
-
-# Environment and IDE files (common for Python projects)
-.env
-.vscode/
