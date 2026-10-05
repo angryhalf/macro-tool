@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -43,11 +44,11 @@ class MainWindow(QMainWindow):
     engine_state_changed = Signal()
     watcher_fired = Signal(str)
 
-    def __init__(self, settings_path=None) -> None:
+    def __init__(self, settings_path: str | Path | None = None) -> None:
         super().__init__()
-        self._settings_path = settings_path
+        self._settings_path = Path(settings_path) if settings_path else None
         self._settings: AppSettings = (
-            load_settings(settings_path) if settings_path else load_settings()
+            load_settings(self._settings_path) if self._settings_path else load_settings()
         )
 
         self.setWindowTitle("Macro Tool")

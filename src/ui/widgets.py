@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QKeyEvent, QPixmap
-from PySide6.QtWidgets import QPushButton, QWidget
+import logging
+
+import numpy as np
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeyEvent, QImage
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 from services.input import describe_hotkey
-from services.screen_capture import bgr_to_qimage, grab_full_screen
+
+logger = logging.getLogger(__name__)
 
 # Qt keys that have no printable text mapped to pynput key names.
 _QT_KEY_NAMES: dict[Qt.Key, str] = {
@@ -134,48 +138,32 @@ class HotkeyButton(QPushButton):
         return "+".join(parts)
 
 
-class RegionPreviewWidget(QWidget):
-    """Live thumbnail of a screen region with pick/crop buttons.
+def _grab_primary_screen():
+    """Capture the primary monitor via Qt (works on Windows/macOS/Linux)."""
+    screen = QApplication.primaryScreen()
+    pixmap = screen.grabWindow(0)
+    image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
+    width, height = image.width(), image.height()
+    buffer = image.constBits()
+    array = np.frombuffer(buffer, dtype=np.uint8, count=image.sizeInBytes()).reshape(
+        (height, image.bytesPerLine() // 4, 4)
+    )[:, :width]
+    return np.ascontiguousarray(array[..., :3], dtype=np.uint8)
 
-    Signals:
-        region_changed(tuple): (left, top, width, height) after picking.
-        template_cropped(str): file path after saving a cropped template.
-    """
 
-    region_changed = Signal(tuple)
-    template_cropped = Signal(str)
+def grab_screen_for_crop():
+    """Return a BGR numpy array of the primary screen, or ``None`` on failure."""
+    try:
+        return _grab_primary_screen()
+    except Exception:  # pragma: no cover - platform capture quirks
+        logger.exception("Qt screen grab failed, falling back to mss")
+    try:
+        from services.screen_capture import grab_full_screen
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setMinimumHeight(140)
-        self._pixmap: QPixmap | None = None
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self.refresh)
-        self._timer.start(500)
-
-    # -- public --------------------------------------------------------
-    def refresh(self) -> None:
-        try:
-            frame = grab_full_screen()
-        except Exception:  # pragma: no cover - transient capture failures
-            return
-        self._pixmap = QPixmap.fromImage(bgr_to_qimage(frame)).scaled(
-            self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-        )
-        self.update()
-
-    # -- painting ------------------------------------------------------
-    def paintEvent(self, event) -> None:  # noqa: N802
-        from PySide6.QtGui import QColor, QPainter, QPen
-
-        painter = QPainter(self)
-        if self._pixmap:
-            painter.drawPixmap(0, 0, self._pixmap)
-        else:
-            painter.fillRect(self.rect(), QColor(30, 30, 30))
-        pen = QPen(QColor(255, 200, 0), 2)
-        painter.setPen(pen)
-        painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
+        return grab_full_screen()
+    except Exception:  # pragma: no cover - headless / permission issues
+        logger.exception("mss screen grab failed too")
+        return None
 
 
 def crop_and_save_template(parent: QWidget | None, save_path: str) -> bool:
@@ -190,6 +178,13 @@ def crop_and_save_template(parent: QWidget | None, save_path: str) -> bool:
     if rect is None:
         return False
     left, top, width, height = rect
-    frame = grab_full_screen()
-    crop = frame[top : top + height, left : left + width]
+    frame = grab_screen_for_crop()
+    if frame is None:
+        return False
+    # Qt grabs start at the primary monitor's origin; translate global coords.
+    origin = QApplication.primaryScreen().geometry().topLeft()
+    crop = frame[top - origin.y() : top - origin.y() + height,
+                 left - origin.x() : left - origin.x() + width]
+    if crop.size == 0:
+        return False
     return save_template(crop, save_path)
