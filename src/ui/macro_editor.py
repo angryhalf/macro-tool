@@ -842,6 +842,7 @@ class MacroRecorderDialog(QDialog):
         if self._recorder is not None:
             self._recorder.stop()
             self._recorder = None
+        self._pressed_keys.clear()
         self._refresh_timer.stop()
         self._record_button.setText("● Start recording")
         if self._status.text().startswith("Recording"):
@@ -865,13 +866,23 @@ class MacroRecorderDialog(QDialog):
             self._events.append((stamp, kind, payload))
 
     def _on_press(self, name: str) -> None:
-        if name == self._stop_hotkey:
-            QTimer.singleShot(0, self._stop)
+        # Runs on a pynput listener thread -- never touch Qt widgets/timers
+        # here; stopping is requested via the _stop_recording_requested
+        # signal, which is delivered on the GUI thread.
+        canonical = _canonical(name)
+        self._pressed_keys.add(canonical)
+        if self._stop_combo.issubset(self._pressed_keys):
+            self._stop_recording_requested.emit()
             return
-        self._append("key_down", {"key": _canonical(name)})
+        self._append("key_down", {"key": canonical})
 
     def _on_release(self, name: str) -> None:
-        self._append("key_up", {"key": _canonical(name)})
+        canonical = _canonical(name)
+        self._pressed_keys.discard(canonical)
+        if self._stop_combo.issubset(self._pressed_keys):
+            self._stop_recording_requested.emit()
+            return
+        self._append("key_up", {"key": canonical})
 
     def _on_move(self, x: int, y: int) -> None:
         self._append("move", {"x": x, "y": y})

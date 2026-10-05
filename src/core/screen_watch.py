@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 def grab_region(region: tuple[int, int, int, int]) -> np.ndarray:
     """Capture a screen rectangle (left, top, width, height) as a BGR array."""
     left, top, width, height = region
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Invalid screen region: {region!r}")
     with mss.mss() as sct:
         shot = sct.grab({"left": left, "top": top, "width": width, "height": height})
         frame = np.array(shot, dtype=np.uint8)
@@ -81,31 +83,3 @@ class ChangeDetector:
         if previous is None:
             return False
         return region_change_score(previous, frame) > self._threshold
-
-
-def evaluate_screen_condition(
-    *,
-    mode: str,
-    region: tuple[int, int, int, int],
-    template_path: str = "",
-    confidence: float = 0.85,
-    change_threshold: float = 5.0,
-    detector: ChangeDetector | None = None,
-) -> bool:
-    """Take one screenshot and evaluate a single screen condition.
-
-    ``image_found`` / ``image_missing`` use template matching; ``region_changed``
-    needs a persistent *detector* so consecutive polls can be compared.
-    Returns True when the condition currently holds.
-    """
-    frame = grab_region(region)
-    if mode == "region_changed":
-        if detector is None:
-            detector = ChangeDetector(change_threshold)
-        return detector.poll(frame)
-    template = load_template(template_path)
-    if template is None:
-        logger.warning("Screen condition '%s' needs a valid template image", mode)
-        return False
-    found = match_template(frame, template, confidence)
-    return found if mode == "image_found" else not found
