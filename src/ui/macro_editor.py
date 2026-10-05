@@ -47,7 +47,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.conditions import ScreenCondition
-from app.settings import ActionConfig, MacroConfig
+from app.settings import CONDITION_ACTION_KINDS, ActionConfig, MacroConfig
 from services.input import InputRecorder, current_mouse_position
 from ui.condition_editor import ConditionEditor
 from ui.widgets import HotkeyButton
@@ -130,6 +130,10 @@ class ActionEditorDialog(QDialog):
         self._pages = QStackedWidget()
         self._page_for_kind: dict[str, QWidget] = {}
         self._condition_editors: dict[str, ConditionEditor] = {}
+        # One shared screen-rule editor reused by every flow-control kind.
+        # Built *before* the per-kind pages so their default values can read
+        # the action being edited (e.g. a wait_for's give-up timeout).
+        self._condition_page, self._shared_condition = self._build_shared_condition_page(action)
         self._add_page("key", self._build_key_page(action))
         self._add_page("hold_key", self._build_hold_page(action))
         self._add_page("combo", self._build_combo_page(action))
@@ -142,9 +146,14 @@ class ActionEditorDialog(QDialog):
         self._add_page("drag", self._build_drag_page(action))
         self._add_page("scroll", self._build_scroll_page(action))
         self._add_page("wait", self._build_wait_page(action))
-        self._add_page("wait_for", self._build_condition_page("wait_for", action))
-        self._add_page("pause", self._build_condition_page("pause", action))
-        self._add_page("unpause", self._build_condition_page("unpause", action))
+        # All three flow-control kinds share the single condition page above;
+        # it is registered for each kind so the stacked widget can show it.
+        for kind in ("wait_for", "pause", "unpause"):
+            self._add_page(kind, self._condition_page)
+        # The dict keeps its original (per-kind editor) contract: every kind
+        # maps to the same shared editor instance.
+        for kind in ("wait_for", "pause", "unpause"):
+            self._condition_editors[kind] = self._shared_condition
 
         self._kind.currentIndexChanged.connect(self._show_page)
 
@@ -315,20 +324,29 @@ class ActionEditorDialog(QDialog):
         form.addRow("Wait:", self._wait_duration)
         return page
 
-    def _build_condition_page(self, kind: str, action: ActionConfig) -> QWidget:
+    def _build_shared_condition_page(self, action: ActionConfig) -> tuple[QWidget, ConditionEditor]:
         """Page for the flow-control actions (``wait_for``/``pause``/``unpause``).
 
-        Embeds a :class:`ConditionEditor` so the screen rule lives *on the
-        action itself*; ``wait_for`` additionally exposes its give-up timeout.
+        All three kinds share this one page -- a single :class:`ConditionEditor`
+        so the screen rule lives *on the action itself* and stays intact while
+        the user flips between the three entries in the Type combo.  The hint
+        text at the top swaps per kind (see :meth:`_show_page`) and the
+        give-up timeout row is only shown for ``wait_for``.
         """
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(self._hint(_CONDITION_HINTS[kind]))
-        editor = ConditionEditor(show_timeout=kind == "wait_for")
+        self._condition_hint = QLabel(_CONDITION_HINTS["wait_for"])
+        self._condition_hint.setWordWrap(True)
+        self._condition_hint.setStyleSheet("color: gray;")
+        layout.addWidget(self._condition_hint)
+        editor = ConditionEditor(show_timeout=True)
+        # Seed defaults from the action being edited (its own condition plus
+        # the wait_for give-up timeout stored in duration_ms).
         editor.load(action.condition if action.condition is not None else ScreenCondition(template_path=""))
-        self._condition_editors[kind] = editor
+        editor.timeout_spin.setValue(max(0, min(editor.timeout_spin.maximum(), action.duration_ms)))
+        self._shared_condition = editor
         layout.addWidget(editor)
-        return page
+        return page, editor
 
     @staticmethod
     def _position_spins(action: ActionConfig) -> tuple[QSpinBox, QSpinBox]:
@@ -340,7 +358,11 @@ class ActionEditorDialog(QDialog):
     # Navigation between pages
     # ------------------------------------------------------------------
     def _show_page(self) -> None:
-        page = self._page_for_kind.get(self._kind.currentData())
+        kind = self._kind.currentData()
+        if kind in _CONDITION_HINTS:  # a flow-control action
+            self._condition_hint.setText(_CONDITION_HINTS[kind])
+            self._shared_condition.set_timeout_visible(kind == "wait_for")
+        page = self._page_for_kind.get(kind)
         if page is not None:
             self._pages.setCurrentWidget(page)
 
@@ -573,12 +595,16 @@ class ActionEditorDialog(QDialog):
             return ActionConfig(kind=kind, amount=self._scroll_amount.value())
         if kind == "wait":
             return ActionConfig(kind=kind, duration_ms=self._wait_duration.value())
-        if kind in ("wait_for", "pause", "unpause"):
+        if kind in CONDITION_ACTION_KINDS:
             editor = self._condition_editors.get(kind)
             condition = editor.build() if editor is not None else None
+            duration_ms = 0
             if condition is not None and not condition.configured:
                 condition = None
-            return ActionConfig(kind=kind, condition=condition)
+            elif kind == "wait_for" and condition is not None:
+                # Give-up timeout lives on the action's duration_ms field.
+                duration_ms = condition.timeout_ms
+            return ActionConfig(kind=kind, condition=condition, duration_ms=duration_ms)
         return ActionConfig(kind=kind)
 
 

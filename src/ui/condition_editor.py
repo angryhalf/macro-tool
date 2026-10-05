@@ -113,6 +113,11 @@ class ConditionEditor(QWidget):
     # ------------------------------------------------------------------
     # Model <-> widgets
     # ------------------------------------------------------------------
+    def set_timeout_visible(self, visible: bool) -> None:
+        """Show/hide the give-up timeout row after construction."""
+        self.timeout_label.setVisible(visible)
+        self.timeout_spin.setVisible(visible)
+
     def load(self, condition: ScreenCondition | None) -> None:
         """Populate the form from *condition* (``None`` resets to defaults)."""
         condition = condition or ScreenCondition()
