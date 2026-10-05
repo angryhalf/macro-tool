@@ -2,8 +2,6 @@
 __pycache__/
 *.pyc
 
-# Environment and IDE
+# Environment and IDE files (common for Python projects)
 .env
-.env.local
 .vscode/
-.idea/

@@ -74,6 +74,9 @@ class ExecutionToken:
         self.blocked_rules: list[dict] = []
         # True while inside a bare stop-trigger/start-trigger stretch (see docstring).
         self.stretch_open = False
+        # The ``while`` rule of the currently open stop_trigger(rule) stretch,
+        # if any; its rule is disarmed when the matching start_trigger closes it.
+        self.stretch_rule: ScreenCondition | None = None
 
     # -- cancellation --------------------------------------------------
     def cancel(self) -> None:
@@ -107,6 +110,11 @@ class ExecutionToken:
     def gated(self) -> bool:
         """Alias used by the UI: actions currently held back by a rule."""
         return self._blocked.is_set()
+
+    def remove_rule(self, condition: "ScreenCondition") -> None:
+        """Drop an armed rule (used when a stop-trigger stretch is closed)."""
+        self.blocked_rules = [e for e in self.blocked_rules if e.get("condition") is not condition]
+        self.refresh_block()
 
     def wait_while_blocked(self) -> None:
         """Block while later actions are triggered off; returns when they
@@ -371,6 +379,8 @@ class MacroEngine:
                     assert condition is not None
                     entry = {"mode": "while", "condition": condition, "_runtime": None, "_blocking": False}
                     token.blocked_rules.append(entry)
+                    token.stretch_open = True
+                    token.stretch_rule = condition
                     logger.info(
                         "Stop trigger armed at step %d/%d: actions after this point are "
                         "triggered off while '%s' is on screen",
@@ -383,7 +393,7 @@ class MacroEngine:
                     # steps keep gating their own stretches, not this one.
                     token.blocked_rules.append({"mode": "hold", "condition": None, "_blocking": True})
                     token.stretch_open = True
-                    token.stretch_start = len(token.blocked_rules) - 1
+                    token.stretch_rule = None
                     logger.info(
                         "Trigger stretch opened at step %d/%d: actions hold until the "
                         "next start-trigger step",
@@ -410,19 +420,17 @@ class MacroEngine:
                             index + 1, total, condition.description,
                         )
                 else:
-                    # Close the current stretch (or release a leftover hold).
+                    # Close the current stretch: release any bare hold *and*
+                    # disarm the stop-trigger rule that gated the stretch, so
+                    # the actions written after this marker run freely again.
                     if token.stretch_open:
-                        # Remove *this* stretch's hold entry only; rules armed
-                        # before the stretch stay in place for their own scope.
-                        start = min(token.stretch_start, len(token.blocked_rules))
-                        token.blocked_rules = [
-                            e for i, e in enumerate(token.blocked_rules)
-                            if not (i >= start and e["mode"] == "hold")
-                        ]
+                        if token.stretch_rule is not None:
+                            token.remove_rule(token.stretch_rule)
+                            token.stretch_rule = None
                         token.stretch_open = False
                         logger.info("Trigger stretch closed at step %d/%d", index + 1, total)
-                    else:
-                        token.blocked_rules = [e for e in token.blocked_rules if e["mode"] != "hold"]
+                    token.blocked_rules = [e for e in token.blocked_rules if e["mode"] != "hold"]
+                    token.refresh_block()
                     # Any wait-for-start-trigger rule before this point is done:
                     # from here the following actions run freely again.
                     token.blocked_rules = [e for e in token.blocked_rules if e["mode"] != "until"]
