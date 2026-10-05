@@ -25,7 +25,7 @@ import threading
 import time
 from typing import Callable
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 
 from app.conditions import ScreenCondition
 from app.settings import CONDITION_ACTION_KINDS, ActionConfig, MacroConfig
-from services.input import InputRecorder, current_mouse_position
+from services.input import InputRecorder, current_mouse_position, describe_hotkey, sort_combo
 from ui.condition_editor import ConditionEditor
 from ui.widgets import HotkeyButton
 
@@ -112,15 +112,30 @@ class ActionEditorDialog(QDialog):
     relevant fields are visible.  Recording buttons use short countdowns or
     background pynput listeners so you can focus the window you actually
     want to send input to.
+
+    pynput listener callbacks never touch Qt widgets directly; they marshal
+    their updates onto the GUI thread through the :attr:`_gui_call` signal.
+    Per-kind widgets live in :attr:`_key_fields` / :attr:`_click_fields` so
+    that e.g. the hold-key page cannot overwrite the normal key page's line
+    edit (and vice versa).
     """
+
+    #: Carries a zero-argument callable from a pynput listener thread to the
+    #: GUI thread (Qt objects may only be modified from the GUI thread).
+    _gui_call = Signal(object)
 
     def __init__(self, action: ActionConfig | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._gui_call.connect(self._dispatch_gui_call)
         self.setWindowTitle("Macro action")
         self.setMinimumWidth(440)
         action = action or ActionConfig()
 
         self._recorder: InputRecorder | None = None
+        # Per-kind widget storage: each page keeps its *own* fields keyed by
+        # action kind instead of sharing one attribute name across pages.
+        self._key_fields: dict[str, QLineEdit] = {}
+        self._click_fields: dict[str, tuple[QComboBox, QSpinBox, QSpinBox, QCheckBox]] = {}
 
         self._kind = QComboBox()
         for label, kind in ACTION_KINDS.items():
@@ -135,13 +150,13 @@ class ActionEditorDialog(QDialog):
         # Built *before* the per-kind pages so their default values can read
         # the action being edited (e.g. a wait_for's give-up timeout).
         self._condition_page, self._shared_condition = self._build_shared_condition_page(action)
-        self._add_page("key", self._build_key_page(action))
+        self._add_page("key", self._build_key_page(action, "key"))
         self._add_page("hold_key", self._build_hold_page(action))
         self._add_page("combo", self._build_combo_page(action))
         self._add_page("type", self._build_type_page(action))
         self._add_page("move", self._build_move_page(action))
-        self._add_page("click", self._build_click_page(action))
-        self._add_page("double_click", self._build_click_page(action, double=True))
+        self._add_page("click", self._build_click_page(action, "click"))
+        self._add_page("double_click", self._build_click_page(action, "double_click"))
         self._add_page("mouse_down", self._build_button_page("down"))
         self._add_page("mouse_up", self._build_button_page("up"))
         self._add_page("drag", self._build_drag_page(action))
@@ -184,19 +199,20 @@ class ActionEditorDialog(QDialog):
         label.setWordWrap(True)
         return label
 
-    def _build_key_page(self, action: ActionConfig) -> QWidget:
+    def _build_key_page(self, action: ActionConfig, kind: str) -> QWidget:
         page = QWidget()
-        self._key = QLineEdit(action.key)
-        self._key.setPlaceholderText("e.g. a, space, f5, enter")
+        key_edit = QLineEdit(action.key)
+        key_edit.setPlaceholderText("e.g. a, space, f5, enter")
         record = QPushButton("Record key…")
-        record.clicked.connect(lambda: self._record_single_key(self._key))
+        record.clicked.connect(lambda: self._record_single_key(key_edit))
         layout = QVBoxLayout(page)
-        layout.addLayout(_FieldRow(self._key, record))
+        layout.addLayout(_FieldRow(key_edit, record))
         layout.addWidget(self._hint(_KEY_FIELD_HINT))
+        self._key_fields[kind] = key_edit
         return page
 
     def _build_hold_page(self, action: ActionConfig) -> QWidget:
-        page = self._build_key_page(action)
+        page = self._build_key_page(action, "hold_key")
         self._hold_duration = QSpinBox(minimum=1, maximum=600_000, value=max(1, action.duration_ms))
         self._hold_duration.setSuffix(" ms")
         record = QPushButton("Record hold…")
@@ -245,28 +261,29 @@ class ActionEditorDialog(QDialog):
         form.addRow("", record)
         return page
 
-    def _build_click_page(self, action: ActionConfig, *, double: bool = False) -> QWidget:
+    def _build_click_page(self, action: ActionConfig, kind: str) -> QWidget:
         page = QWidget()
-        self._click_button = QComboBox()
-        self._click_button.addItems(BUTTONS)
-        self._click_button.setCurrentText(action.button)
-        self._click_x, self._click_y = self._position_spins(action)
-        self._click_at_position = QCheckBox("Click at specific position")
-        self._click_at_position.setChecked(action.x is not None)
-        self._click_at_position.toggled.connect(self._click_x.setEnabled)
-        self._click_at_position.toggled.connect(self._click_y.setEnabled)
-        self._click_x.setEnabled(action.x is not None)
-        self._click_y.setEnabled(action.y is not None)
+        button_box = QComboBox()
+        button_box.addItems(BUTTONS)
+        button_box.setCurrentText(action.button)
+        x_spin, y_spin = self._position_spins(action)
+        at_position = QCheckBox("Click at specific position")
+        at_position.setChecked(action.x is not None)
+        at_position.toggled.connect(x_spin.setEnabled)
+        at_position.toggled.connect(y_spin.setEnabled)
+        x_spin.setEnabled(action.x is not None)
+        y_spin.setEnabled(action.x is not None)
         record = QPushButton("Record click…")
-        record.clicked.connect(lambda: self._record_click(self._click_button, self._click_x, self._click_y))
+        record.clicked.connect(lambda: self._record_click(button_box, x_spin, y_spin))
         form = QFormLayout(page)
-        form.addRow("Mouse button:", self._click_button)
-        form.addRow("", self._click_at_position)
-        form.addRow("Position X:", self._click_x)
-        form.addRow("Position Y:", self._click_y)
+        form.addRow("Mouse button:", button_box)
+        form.addRow("", at_position)
+        form.addRow("Position X:", x_spin)
+        form.addRow("Position Y:", y_spin)
         form.addRow("", record)
-        if double:
+        if kind == "double_click":
             form.addRow(self._hint("Sends two rapid clicks when the macro runs."))
+        self._click_fields[kind] = (button_box, x_spin, y_spin, at_position)
         return page
 
     def _build_button_page(self, direction: str) -> QWidget:
@@ -370,6 +387,15 @@ class ActionEditorDialog(QDialog):
     # ------------------------------------------------------------------
     # Recording helpers
     # ------------------------------------------------------------------
+    def _run_on_gui(self, callback: Callable[[], None]) -> None:
+        """Marshal *callback* onto the Qt GUI thread (safe from pynput threads)."""
+        self._gui_call.emit(callback)
+
+    @staticmethod
+    def _dispatch_gui_call(callback: Callable[[], None]) -> None:
+        """Slot invoked on the GUI thread for every :attr:`_gui_call` emission."""
+        callback()
+
     def _capture_after_countdown(self, x_spin: QSpinBox, y_spin: QSpinBox, seconds: int = 2) -> None:
         """Write the pointer position into *x_spin*/*y_spin* after a countdown.
 
@@ -406,8 +432,10 @@ class ActionEditorDialog(QDialog):
         """Listen globally until a handler returns True (or *timeout_s* elapses).
 
         Handlers run on the pynput listener thread; they must only touch Qt
-        widgets through thread-safe calls (``setText``/``setValue`` are fine
-        because we stop via :meth:`QTimer.singleShot` back on the GUI thread).
+        widgets through :meth:`_run_on_gui`, which marshals the update onto
+        the GUI thread via the :attr:`_gui_call` signal.  Stopping also goes
+        through that signal -- ``QTimer`` objects may not be created or
+        started from a non-Qt thread.
         """
         if self._recorder is not None and self._recorder.running:
             return
@@ -420,7 +448,7 @@ class ActionEditorDialog(QDialog):
             except Exception:  # pragma: no cover - defensive
                 done = True
             if done:
-                QTimer.singleShot(0, self._stop_recording_window)
+                self._run_on_gui(self._stop_recording_window)
 
         self._recorder = InputRecorder(
             on_press=lambda name: dispatch(on_press, name),
@@ -448,7 +476,7 @@ class ActionEditorDialog(QDialog):
         def handle(name: str) -> bool:
             if name.startswith(("ctrl", "alt", "shift", "cmd")):
                 return False
-            target.setText(name)
+            self._run_on_gui(lambda: target.setText(name))
             return True
 
         self._start_recording_window("Recording — press one key…", 10.0, on_press=handle)
@@ -463,7 +491,8 @@ class ActionEditorDialog(QDialog):
                 return False
             modifiers = sorted(p for p in pressed if p.startswith(("ctrl", "alt", "shift", "cmd")))
             base = name.split("_")[0] if "_" in name else name
-            self._combo.setText("+".join(modifiers + [base]))
+            combo = "+".join(modifiers + [base])
+            self._run_on_gui(lambda: self._combo.setText(combo))
             return True
 
         self._start_recording_window("Recording — press a combo (e.g. Ctrl+C)…", 10.0, on_press=handle)
@@ -476,15 +505,17 @@ class ActionEditorDialog(QDialog):
             if name.startswith(("ctrl", "alt", "shift", "cmd")):
                 return False
             state["press_at"] = time.monotonic()
-            self._key.setText(name)
-            self.setWindowTitle("Recording — release the key…")
+            key_edit = self._key_fields["hold_key"]
+            self._run_on_gui(
+                lambda: (key_edit.setText(name), self.setWindowTitle("Recording — release the key…"))
+            )
             return False  # keep listening for the release event
 
         def on_release(name: str) -> bool:
             if "press_at" not in state:
                 return False
             held_ms = max(1, int((time.monotonic() - state["press_at"]) * 1000))
-            self._hold_duration.setValue(held_ms)
+            self._run_on_gui(lambda: self._hold_duration.setValue(held_ms))
             return True
 
         self._start_recording_window(
@@ -498,7 +529,8 @@ class ActionEditorDialog(QDialog):
         def handle(name: str) -> bool:
             if name == "enter":
                 if buffer:
-                    self._text.setText("".join(buffer))
+                    text = "".join(buffer)
+                    self._run_on_gui(lambda: self._text.setText(text))
                 return True
             if len(name) == 1:
                 buffer.append(name)
@@ -515,13 +547,17 @@ class ActionEditorDialog(QDialog):
     ) -> None:
         """Capture the next mouse click: which button and where."""
 
-        def on_button(button: str) -> None:
+        def apply_click(button: str, pos_x: int, pos_y: int, use_position: bool) -> None:
             button_box.setCurrentText(button)
-            if x_spin.isEnabled():
-                pos_x, pos_y = current_mouse_position()
+            if use_position:
                 x_spin.setValue(pos_x)
                 y_spin.setValue(pos_y)
-            QTimer.singleShot(0, self._stop_recording_window)
+
+        def on_button(button: str) -> None:
+            pos_x, pos_y = current_mouse_position()
+            use_position = x_spin.isEnabled()
+            self._run_on_gui(lambda: apply_click(button, pos_x, pos_y, use_position))
+            self._run_on_gui(self._stop_recording_window)
 
         self._start_mouse_recording("Recording — perform a click…", on_button)
 
@@ -529,8 +565,8 @@ class ActionEditorDialog(QDialog):
         """Capture which physical mouse button the user presses next."""
 
         def on_button(button: str) -> None:
-            button_box.setCurrentText(button)
-            QTimer.singleShot(0, self._stop_recording_window)
+            self._run_on_gui(lambda: button_box.setCurrentText(button))
+            self._run_on_gui(self._stop_recording_window)
 
         self._start_mouse_recording("Recording — press a mouse button…", on_button)
 
@@ -561,10 +597,12 @@ class ActionEditorDialog(QDialog):
         """Build the :class:`ActionConfig` described by the current page."""
         kind = self._kind.currentData()
         if kind == "key":
-            return ActionConfig(kind=kind, key=self._key.text().strip().lower())
+            return ActionConfig(kind=kind, key=self._key_fields["key"].text().strip().lower())
         if kind == "hold_key":
             return ActionConfig(
-                kind=kind, key=self._key.text().strip().lower(), duration_ms=self._hold_duration.value()
+                kind=kind,
+                key=self._key_fields["hold_key"].text().strip().lower(),
+                duration_ms=self._hold_duration.value(),
             )
         if kind == "combo":
             return ActionConfig(kind=kind, combo=self._combo.text().strip().lower())
@@ -573,12 +611,13 @@ class ActionEditorDialog(QDialog):
         if kind == "move":
             return ActionConfig(kind=kind, x=self._move_x.value(), y=self._move_y.value())
         if kind in ("click", "double_click"):
-            at_position = self._click_at_position.isChecked()
+            button_box, x_spin, y_spin, at_position = self._click_fields[kind]
+            use_position = at_position.isChecked()
             return ActionConfig(
                 kind=kind,
-                button=self._click_button.currentText(),
-                x=self._click_x.value() if at_position else None,
-                y=self._click_y.value() if at_position else None,
+                button=button_box.currentText(),
+                x=x_spin.value() if use_position else None,
+                y=y_spin.value() if use_position else None,
             )
         if kind in ("mouse_down", "mouse_up"):
             box: QComboBox = getattr(self, f"_button_{kind.split('_')[1]}")
@@ -712,14 +751,28 @@ class MacroRecorderDialog(QDialog):
     Start the recording, work normally for a while, then press the global
     stop hotkey (default ``F8``) or click *Stop*.  Raw events are shown live
     and converted into compact macro steps when accepted.
+
+    The pynput listener threads never touch Qt widgets directly: stopping is
+    requested through the :attr:`_stop_recording_requested` signal, which is
+    delivered on the GUI thread.
     """
+
+    #: Emitted from a pynput listener thread to request stopping on the GUI thread.
+    _stop_recording_requested = Signal()
 
     def __init__(self, stop_hotkey: str = "f8", parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._stop_recording_requested.connect(self._stop)
         self.setWindowTitle("Record macro inputs")
         self.setMinimumSize(560, 400)
 
-        self._stop_hotkey = _canonical(stop_hotkey.strip().lower().split("+")[-1])
+        # Keep the *whole* normalized stop combination (e.g. ctrl+shift+s),
+        # not just its final key -- otherwise plain 's' would also stop.
+        self._stop_hotkey = sort_combo(stop_hotkey.strip().lower())
+        self._stop_combo: frozenset[str] = frozenset(
+            _canonical(part) for part in self._stop_hotkey.split("+") if part.strip()
+        )
+        self._pressed_keys: set[str] = set()
         self._events: list[tuple[float, str, dict]] = []
         self._lock = threading.Lock()
         self._recorder: InputRecorder | None = None
@@ -769,9 +822,12 @@ class MacroRecorderDialog(QDialog):
     def _start(self) -> None:
         with self._lock:
             self._events.clear()
+        self._pressed_keys.clear()
         self._started_at = time.monotonic()
         self._record_button.setText("■ Stop recording")
-        self._status.setText(f"Recording… press the stop hotkey ({self._stop_hotkey.upper()}) when done.")
+        self._status.setText(
+            f"Recording… press the stop hotkey ({describe_hotkey(self._stop_hotkey)}) when done."
+        )
         self._refresh_timer.start(400)
         self._recorder = InputRecorder(
             on_press=self._on_press,
@@ -786,6 +842,7 @@ class MacroRecorderDialog(QDialog):
         if self._recorder is not None:
             self._recorder.stop()
             self._recorder = None
+        self._pressed_keys.clear()
         self._refresh_timer.stop()
         self._record_button.setText("● Start recording")
         if self._status.text().startswith("Recording"):
@@ -809,13 +866,23 @@ class MacroRecorderDialog(QDialog):
             self._events.append((stamp, kind, payload))
 
     def _on_press(self, name: str) -> None:
-        if name == self._stop_hotkey:
-            QTimer.singleShot(0, self._stop)
+        # Runs on a pynput listener thread -- never touch Qt widgets/timers
+        # here; stopping is requested via the _stop_recording_requested
+        # signal, which is delivered on the GUI thread.
+        canonical = _canonical(name)
+        self._pressed_keys.add(canonical)
+        if self._stop_combo.issubset(self._pressed_keys):
+            self._stop_recording_requested.emit()
             return
-        self._append("key_down", {"key": _canonical(name)})
+        self._append("key_down", {"key": canonical})
 
     def _on_release(self, name: str) -> None:
-        self._append("key_up", {"key": _canonical(name)})
+        canonical = _canonical(name)
+        self._pressed_keys.discard(canonical)
+        if self._stop_combo.issubset(self._pressed_keys):
+            self._stop_recording_requested.emit()
+            return
+        self._append("key_up", {"key": canonical})
 
     def _on_move(self, x: int, y: int) -> None:
         self._append("move", {"x": x, "y": y})

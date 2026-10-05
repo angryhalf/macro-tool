@@ -18,11 +18,6 @@ from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QWidget
 
-from services.screen_capture import (
-    bgr_to_qimage,
-    grab_primary_screen_via_qt,
-)
-
 logger = logging.getLogger(__name__)
 
 _BORDER_PX = 2
@@ -151,27 +146,42 @@ class RegionPickerDialog(QDialog):
     def _grab_virtual_desktop() -> tuple[QImage, QPoint]:
         """Capture the desktop behind us; returns (image, top-left in global coords).
 
-        Uses Qt's own screen grab so the frozen background and the returned
+        Uses Qt's own per-screen grab so multi-monitor setups are composited
+        completely (every monitor is captured and placed at its position in
+        the virtual desktop) and so the frozen background and the returned
         coordinates share the same DPI-independent coordinate space as the
         overlay window itself.
         """
-        geometry = QApplication.primaryScreen().virtualGeometry()
-        primary = QApplication.primaryScreen().geometry()
-        try:
-            frame = grab_primary_screen_via_qt()
-        except Exception:  # pragma: no cover - transient capture failures
-            logger.exception("Screen capture failed, using blank picker background")
-            frame = None
-        if frame is None or frame.size == 0:
-            image = QImage(geometry.size(), QImage.Format.Format_RGB888)
-            image.fill(QColor(20, 20, 20))
-            return image, geometry.topLeft()
+        app = QApplication.instance()
+        screens = app.screens() if isinstance(app, QApplication) else []
+        if not screens:
+            screens = [QApplication.primaryScreen()]
+
+        geometry = QRect(screens[0].virtualGeometry()) if hasattr(screens[0], "virtualGeometry") else None
+        if geometry is None or geometry.isNull():
+            geometry = screens[0].geometry()
+        for screen in screens:
+            geometry = geometry.united(screen.geometry())
+
         canvas = QImage(geometry.size(), QImage.Format.Format_RGB888)
         canvas.fill(QColor(20, 20, 20))
         painter = QPainter(canvas)
-        # Place the primary-monitor shot at its position within the virtual desktop.
-        painter.drawImage(primary.topLeft() - geometry.topLeft(), bgr_to_qimage(frame))
-        painter.end()
+        try:
+            for screen in screens:
+                try:
+                    shot = screen.grabWindow(0).toImage()
+                except Exception:  # pragma: no cover - transient capture failures
+                    logger.exception(
+                        "Screen capture failed for monitor %s, leaving that area blank",
+                        screen.name(),
+                    )
+                    continue
+                if shot.isNull():
+                    continue
+                # Place this monitor's shot at its position within the virtual desktop.
+                painter.drawImage(screen.geometry().topLeft() - geometry.topLeft(), shot)
+        finally:
+            painter.end()
         return canvas, geometry.topLeft()
 
     # ------------------------------------------------------------------

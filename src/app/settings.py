@@ -76,25 +76,38 @@ class AppSettings:
     execution_delay_ms: int = 500  # countdown before a macro starts, to allow focusing the target window
 
 
-def _action_from_dict(raw: dict[str, Any]) -> ActionConfig:
+def _action_from_dict(raw: Any) -> ActionConfig:
+    if not isinstance(raw, dict):
+        return ActionConfig()
+
     known = {k: v for k, v in raw.items() if k in ActionConfig.__dataclass_fields__ and k != "condition"}
     condition = _condition_from_dict(raw.get("condition"))
     return ActionConfig(condition=condition, **known)
 
 
-def _condition_from_dict(raw: dict[str, Any] | None) -> ScreenCondition | None:
+def _condition_from_dict(raw: Any) -> ScreenCondition | None:
     """Rebuild an optional :class:`ScreenCondition` from its JSON form."""
     if not isinstance(raw, dict):
         return None
     known = {k: v for k, v in raw.items() if k in ScreenCondition.__dataclass_fields__}
     if "region" in known:
-        known["region"] = tuple(known["region"])  # type: ignore[assignment]
+        region = known["region"]
+        if isinstance(region, (list, tuple)) and len(region) == 4:
+            known["region"] = tuple(region)
+        else:
+            known.pop("region", None)
     return ScreenCondition(**known)
 
 
-def _macro_from_dict(raw: dict[str, Any]) -> MacroConfig:
+def _macro_from_dict(raw: Any) -> MacroConfig:
+    if not isinstance(raw, dict):
+        return MacroConfig()
+
     known = {k: v for k, v in raw.items() if k in MacroConfig.__dataclass_fields__ and k != "actions"}
-    actions = [_action_from_dict(a) for a in raw.get("actions", [])]
+    raw_actions = raw.get("actions", [])
+    if not isinstance(raw_actions, list):
+        raw_actions = []
+    actions = [_action_from_dict(a) for a in raw_actions]
     actions = _migrate_legacy_conditions(raw, actions)
     return MacroConfig(actions=tuple(actions), **known)
 
@@ -128,15 +141,26 @@ def _migrate_legacy_conditions(raw: dict[str, Any], actions: list[ActionConfig])
 
 
 def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> AppSettings:
-    """Load settings from JSON, falling back to defaults on any problem."""
+    """Load settings from JSON, falling back to defaults on any problem.
+
+    Tolerates valid JSON with the wrong shape (e.g. a top-level list or
+    non-object macro entries) instead of raising ``AttributeError``.
+    """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return AppSettings()
+
+        raw_macros = raw.get("macros", [])
+        if not isinstance(raw_macros, list):
+            return AppSettings()
+
         return AppSettings(
-            macros=tuple(_macro_from_dict(m) for m in raw.get("macros", [])),
-            stop_hotkey=raw.get("stop_hotkey", "f8"),
+            macros=tuple(_macro_from_dict(m) for m in raw_macros),
+            stop_hotkey=str(raw.get("stop_hotkey", "f8")),
             execution_delay_ms=int(raw.get("execution_delay_ms", 500)),
         )
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return AppSettings()
 
 

@@ -69,6 +69,10 @@ class ExecutionToken:
     def __init__(self) -> None:
         self._cancelled = threading.Event()
         self._blocked = threading.Event()  # set => later actions are triggered off
+        # Guards ``blocked_rules``: the worker thread and the background
+        # monitor both mutate the list, so every read-modify-write of it
+        # happens while holding this lock (prevents lost updates).
+        self.rules_lock = threading.Lock()
         # Rules armed by the ``stop_trigger``/``start_trigger`` steps reached so far.
         # Each entry: {"mode": "while"|"until"|"hold", "condition": ...}
         self.blocked_rules: list[dict] = []
@@ -113,7 +117,8 @@ class ExecutionToken:
 
     def remove_rule(self, condition: "ScreenCondition") -> None:
         """Drop an armed rule (used when a stop-trigger stretch is closed)."""
-        self.blocked_rules = [e for e in self.blocked_rules if e.get("condition") is not condition]
+        with self.rules_lock:
+            self.blocked_rules = [e for e in self.blocked_rules if e.get("condition") is not condition]
         self.refresh_block()
 
     def wait_while_blocked(self) -> None:
@@ -228,6 +233,10 @@ class MacroEngine:
             daemon=True,
         )
         with self._lock:
+            existing = self._macro_tokens.get(macro.name)
+            if existing is not None and existing in self._tokens and not existing.cancelled:
+                logger.info("Macro '%s' is already running; ignoring duplicate start", macro.name)
+                return existing
             self._tokens.add(token)
             self._macro_tokens[macro.name] = token
         thread.start()
@@ -321,7 +330,8 @@ class MacroEngine:
                 # Loop boundary: whatever trigger rules are left armed from
                 # the last pass no longer apply to the next one -- start it
                 # with every action triggered on.
-                token.blocked_rules = []
+                with token.rules_lock:
+                    token.blocked_rules = []
                 token.stretch_open = False
                 token.refresh_block()
                 if not macro.repeat and loops >= max(1, macro.loops):
@@ -378,7 +388,8 @@ class MacroEngine:
                 if has_rule:
                     assert condition is not None
                     entry = {"mode": "while", "condition": condition, "_runtime": None, "_blocking": False}
-                    token.blocked_rules.append(entry)
+                    with token.rules_lock:
+                        token.blocked_rules.append(entry)
                     token.stretch_open = True
                     token.stretch_rule = condition
                     logger.info(
@@ -391,7 +402,8 @@ class MacroEngine:
                     # start_trigger closes the stretch.  The hold is scoped to
                     # this stretch only -- rules armed by earlier stop-trigger
                     # steps keep gating their own stretches, not this one.
-                    token.blocked_rules.append({"mode": "hold", "condition": None, "_blocking": True})
+                    with token.rules_lock:
+                        token.blocked_rules.append({"mode": "hold", "condition": None, "_blocking": True})
                     token.stretch_open = True
                     token.stretch_rule = None
                     logger.info(
@@ -411,9 +423,10 @@ class MacroEngine:
                             index + 1, total,
                         )
                     else:
-                        token.blocked_rules.append(
-                            {"mode": "until", "condition": condition, "_runtime": None, "_blocking": True}
-                        )
+                        with token.rules_lock:
+                            token.blocked_rules.append(
+                                {"mode": "until", "condition": condition, "_runtime": None, "_blocking": True}
+                            )
                         logger.info(
                             "Start trigger armed at step %d/%d: actions after this point "
                             "stay triggered off until '%s' is on screen",
@@ -429,11 +442,13 @@ class MacroEngine:
                             token.stretch_rule = None
                         token.stretch_open = False
                         logger.info("Trigger stretch closed at step %d/%d", index + 1, total)
-                    token.blocked_rules = [e for e in token.blocked_rules if e["mode"] != "hold"]
+                    with token.rules_lock:
+                        # Any wait-for-start-trigger rule before this point is
+                        # done: from here the following actions run freely again.
+                        token.blocked_rules = [
+                            e for e in token.blocked_rules if e["mode"] not in ("hold", "until")
+                        ]
                     token.refresh_block()
-                    # Any wait-for-start-trigger rule before this point is done:
-                    # from here the following actions run freely again.
-                    token.blocked_rules = [e for e in token.blocked_rules if e["mode"] != "until"]
                 self._sync_triggers(token)
             else:
                 token.wait_while_blocked()  # don't fire while triggered off
@@ -446,8 +461,9 @@ class MacroEngine:
     @staticmethod
     def _sync_triggers(token: ExecutionToken) -> None:
         """Reflect the *current* screen state of the armed rules right away."""
-        for entry in token.blocked_rules:
-            entry["_blocking"] = MacroEngine._rule_blocks_now(entry)
+        with token.rules_lock:
+            for entry in token.blocked_rules:
+                entry["_blocking"] = MacroEngine._rule_blocks_now(entry)
         token.refresh_block()
 
     @staticmethod
@@ -562,14 +578,15 @@ class MacroEngine:
         blocked/on state of the actions after them follows the screen.  When
         an ``until`` rule has been met it is removed from the set entirely.
         """
-        if not token.blocked_rules:
-            # Nothing to watch -- make sure nothing stale is left blocking.
-            was_blocked = token.gated
-            token.refresh_block()
-            return was_blocked
-        for entry in token.blocked_rules:
-            entry["_blocking"] = MacroEngine._rule_blocks_now(entry)
-        token.blocked_rules = [e for e in token.blocked_rules if not e.get("disarm")]
+        with token.rules_lock:
+            if not token.blocked_rules:
+                # Nothing to watch -- make sure nothing stale is left blocking.
+                was_blocked = token.gated
+                token.refresh_block()
+                return was_blocked
+            for entry in token.blocked_rules:
+                entry["_blocking"] = MacroEngine._rule_blocks_now(entry)
+            token.blocked_rules = [e for e in token.blocked_rules if not e.get("disarm")]
         before = token.gated
         token.refresh_block()
         now = token.gated

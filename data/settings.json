@@ -1,6 +1,5 @@
 {
   "macros": [],
-  "watchers": [],
   "stop_hotkey": "f8",
   "execution_delay_ms": 500
 }
