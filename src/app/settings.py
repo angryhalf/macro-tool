@@ -32,9 +32,11 @@ class ActionConfig:
 class MacroConfig:
     """A named sequence of actions with playback and screen-condition options.
 
-    ``start_condition`` gates execution: the macro waits until it holds on
-    screen before running its first action.  ``stop_condition`` interrupts a
-    running macro as soon as it holds.  Either may be left unconfigured.
+    The user turns the macro on/off (run button, hotkey, stop).  Conditions
+    only pause/unpause its actions while it runs:  ``pause_condition`` holds
+    the macro's actions back while it is true on screen; once paused,
+    ``unpause_condition`` (if configured) must hold before execution resumes.
+    Either may be left unconfigured.
     """
 
     name: str = "New macro"
@@ -43,8 +45,8 @@ class MacroConfig:
     loops: int = 1  # ignored when repeat is True
     interval_ms: int = 0  # delay between loops
     actions: tuple[ActionConfig, ...] = ()
-    start_condition: ScreenCondition | None = None
-    stop_condition: ScreenCondition | None = None
+    pause_condition: ScreenCondition | None = None
+    unpause_condition: ScreenCondition | None = None
 
 
 @dataclass(frozen=True)
@@ -90,12 +92,16 @@ def _condition_from_dict(raw: dict[str, Any] | None) -> ScreenCondition | None:
 
 
 def _macro_from_dict(raw: dict[str, Any]) -> MacroConfig:
-    skip = {"actions", "start_condition", "stop_condition"}
+    skip = {"actions", "pause_condition", "unpause_condition"}
     known = {k: v for k, v in raw.items() if k in MacroConfig.__dataclass_fields__ and k not in skip}
+    # Older settings files used start/stop condition names; map them onto the
+    # pause/unpause semantics (the macro is turned on/off by the user).
+    pause_raw = raw.get("pause_condition", raw.get("start_condition"))
+    unpause_raw = raw.get("unpause_condition", raw.get("stop_condition"))
     return MacroConfig(
         actions=tuple(_action_from_dict(a) for a in raw.get("actions", [])),
-        start_condition=_condition_from_dict(raw.get("start_condition")),
-        stop_condition=_condition_from_dict(raw.get("stop_condition")),
+        pause_condition=_condition_from_dict(pause_raw),
+        unpause_condition=_condition_from_dict(unpause_raw),
         **known,
     )
 

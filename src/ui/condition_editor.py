@@ -1,10 +1,10 @@
 """Shared editor widget for one :class:`ScreenCondition`.
 
-Used three times inside the app: as a macro's *start condition*, as a macro's
-*stop condition*, and inside the standalone watcher editor.  It exposes only
-the fields relevant to the selected mode (template picker for image modes,
-sensitivity for change detection) plus polling options and an optional
-timeout.
+Used three times inside the app: as a macro's *pause condition*, as a macro's
+*unpause condition*, and inside the standalone watcher editor.  It exposes
+only the fields relevant to the selected mode (template picker for image
+modes, sensitivity for change detection) plus polling options and an optional
+timeout (used by the pause condition's initial wait).
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ class ConditionEditor(QWidget):
 
         self.timeout_spin = QSpinBox(minimum=0, maximum=600_000, value=0)
         self.timeout_spin.setSuffix(" ms")
-        self.timeout_label = QLabel("Start wait timeout:")
+        self.timeout_label = QLabel("Give-up timeout:")
 
         self.region_label = QLabel("Full screen")
         self.pick_region_button = QPushButton("Pick region…")

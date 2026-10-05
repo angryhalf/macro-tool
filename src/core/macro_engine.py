@@ -4,19 +4,23 @@ The :class:`MacroEngine` runs action sequences on a worker thread, supports
 looping/repeat, hotkey-triggered starts, and an emergency stop that works
 from any thread (GUI button or global hotkey).
 
-Macros can additionally be gated by screen conditions:
+The macro itself is switched on/off by the user (run button / hotkey / stop).
+Screen conditions only *pause* and *unpause* its actions while it runs:
 
-* **start condition** -- the macro waits (polling the screen) until the
-  condition holds before running its first action; an optional timeout gives
-  up waiting.
-* **stop condition** -- while the macro runs, a monitor thread polls the
-  screen and cancels the macro as soon as the condition holds.
+* **pause condition** (``pause_condition``) -- while this holds on
+  screen, execution is paused; when it stops holding, the macro resumes.  An
+  optional timeout bounds how long the initial wait may last before the macro
+  gives up and finishes.
+* **unpause condition** (``unpause_condition``) -- once the macro has
+  been paused, execution stays paused until this condition holds (or forever,
+  if no resume condition is configured).
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 
 from app.conditions import ConditionRuntime
 from app.settings import ActionConfig, AppSettings, MacroConfig
@@ -26,21 +30,55 @@ logger = logging.getLogger(__name__)
 
 
 class ExecutionToken:
-    """Cooperative cancellation handle shared by one running sequence."""
+    """Cooperative cancellation *and* pause handle shared by one running sequence.
+
+    Cancellation is final (user stop / emergency stop).  Pausing is driven by
+    screen conditions: while paused, :meth:`sleep` waits until the sequence is
+    unpaused or cancelled, and :meth:`wait_if_paused` blocks at action
+    boundaries.
+    """
 
     def __init__(self) -> None:
         self._cancelled = threading.Event()
+        self._paused = threading.Event()
 
     def cancel(self) -> None:
         self._cancelled.set()
+        # Never leave a paused sequence hanging after cancellation.
+        self._paused.clear()
 
     @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
 
+    def pause(self) -> None:
+        """Request that the sequence hold before its next action."""
+        self._paused.set()
+
+    def unpause(self) -> None:
+        """Let a paused sequence continue."""
+        self._paused.clear()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
+    def wait_if_paused(self) -> None:
+        """Block while paused; returns when unpaused or cancelled."""
+        while self._paused.is_set() and not self._cancelled.is_set():
+            self._cancelled.wait(0.1)
+
     def sleep(self, seconds: float) -> None:
-        """Interruptible sleep: returns early if the token is cancelled."""
-        self._cancelled.wait(seconds)
+        """Interruptible sleep: honours cancellation and pauses."""
+        deadline = time.monotonic() + seconds
+        while True:
+            self.wait_if_paused()
+            if self._cancelled.is_set():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            self._cancelled.wait(min(remaining, 0.1))
 
 
 class MacroEngine:
@@ -104,10 +142,10 @@ class MacroEngine:
         if not macro.actions:
             logger.info("Macro '%s' has no actions", macro.name)
             return None
-        if macro.start_condition is not None and not macro.start_condition.configured:
-            logger.warning("Macro '%s': start condition is incomplete", macro.name)
-        if macro.stop_condition is not None and not macro.stop_condition.configured:
-            logger.warning("Macro '%s': stop condition is incomplete", macro.name)
+        if macro.pause_condition is not None and not macro.pause_condition.configured:
+            logger.warning("Macro '%s': pause condition is incomplete", macro.name)
+        if macro.unpause_condition is not None and not macro.unpause_condition.configured:
+            logger.warning("Macro '%s': unpause condition is incomplete", macro.name)
         token = ExecutionToken()
         thread = threading.Thread(
             target=self._run_macro,
@@ -161,12 +199,12 @@ class MacroEngine:
     # Worker bodies
     # ------------------------------------------------------------------
     def _run_macro(self, macro: MacroConfig, token: ExecutionToken, initial_delay_s: float) -> None:
-        monitor = self._start_stop_monitor(macro, token)
+        monitor = self._pause_monitor(macro, token)
         try:
             if initial_delay_s > 0:
                 logger.info("Macro '%s' starts in %.1fs", macro.name, initial_delay_s)
                 token.sleep(initial_delay_s)
-            if not self._await_start_condition(macro, token):
+            if not self._await_unpaused(macro, token):
                 return
             loops = 0
             while not token.cancelled:
@@ -183,69 +221,114 @@ class MacroEngine:
         except Exception:  # pragma: no cover - defensive logging
             logger.exception("Macro '%s' crashed", macro.name)
         finally:
+            token.cancel()
             if monitor is not None:
                 monitor.join(timeout=2.0)
             self._finish(token)
 
-    def _await_start_condition(self, macro: MacroConfig, token: ExecutionToken) -> bool:
-        """Block until the macro's start condition holds.
+    def _await_unpaused(self, macro: MacroConfig, token: ExecutionToken) -> bool:
+        """Hold execution until the macro's start condition stops holding.
 
-        Returns True when execution may proceed, False when the macro was
-        cancelled or the wait timed out.
+        The user turns the macro on; the pause condition only holds its
+        actions back while it is true on screen.  An optional timeout bounds
+        this initial wait -- when it elapses while the condition still holds,
+        the macro finishes without acting.  Returns True when execution may
+        proceed, False when cancelled or timed out.  (The background monitor
+        keeps pausing/unpausing the sequence afterwards.)
         """
-        condition = macro.start_condition
+        condition = macro.pause_condition
         if condition is None or not condition.configured or token.cancelled:
             return not token.cancelled
         runtime = ConditionRuntime.create(condition, timeout_s=condition.timeout_ms / 1000.0)
         interval_s = max(condition.poll_interval_ms, 10) / 1000.0
-        logger.info("Macro '%s' waiting for start condition: %s", macro.name, condition.description)
+        logger.info("Macro '%s': waiting for pause condition to clear (%s)", macro.name, condition.description)
         while not token.cancelled:
-            if runtime.expired():
-                logger.info("Macro '%s': start-condition timeout reached, skipping", macro.name)
-                return False
-            token.sleep(interval_s)
-            if token.cancelled:
-                return False
             try:
-                if runtime.evaluate():
-                    logger.info("Macro '%s': start condition met", macro.name)
+                if not runtime.evaluate():
+                    logger.info("Macro '%s': pause condition clear, running", macro.name)
                     return True
             except Exception:  # pragma: no cover - transient capture failures
-                logger.exception("Macro '%s': start-condition check failed", macro.name)
+                logger.exception("Macro '%s': pause-condition check failed", macro.name)
+            if runtime.expired():
+                logger.info("Macro '%s': pause-condition timeout reached, giving up", macro.name)
+                return False
+            token.sleep(interval_s)
         return False
 
-    def _start_stop_monitor(self, macro: MacroConfig, token: ExecutionToken) -> threading.Thread | None:
-        """Poll the stop condition in the background; cancel *token* when it holds."""
-        condition = macro.stop_condition
-        if condition is None or not condition.configured:
+    def _pause_monitor(self, macro: MacroConfig, token: ExecutionToken) -> threading.Thread | None:
+        """Poll the macro's conditions while it runs, pausing/unpausing *token*.
+
+        While the start (pause) condition holds, actions are held back; they
+        resume as soon as it clears.  If a stop (unpause-requirement) condition
+        is configured, execution stays paused after a pause until that
+        condition holds on screen.
+        """
+        pause_condition = macro.pause_condition
+        resume_condition = macro.unpause_condition
+        usable_pause = pause_condition is not None and pause_condition.configured
+        usable_resume = resume_condition is not None and resume_condition.configured
+        if not usable_pause:
             return None
         thread = threading.Thread(
-            target=self._monitor_stop_condition,
-            args=(macro.name, condition, token),
-            name=f"stop-monitor-{macro.name}",
+            target=self._monitor_pause_conditions,
+            args=(macro.name, pause_condition, resume_condition if usable_resume else None, token),
+            name=f"pause-monitor-{macro.name}",
             daemon=True,
         )
         thread.start()
         return thread
 
     @staticmethod
-    def _monitor_stop_condition(macro_name: str, condition, token: ExecutionToken) -> None:
-        runtime = ConditionRuntime.create(condition)
-        interval_s = max(condition.poll_interval_ms, 10) / 1000.0
+    def _monitor_pause_conditions(
+        macro_name: str,
+        pause_condition,
+        resume_condition,
+        token: ExecutionToken,
+    ) -> None:
+        """Flip the token's pause flag as the screen conditions come and go."""
+        pause_runtime = ConditionRuntime.create(pause_condition)
+        resume_runtime = ConditionRuntime.create(resume_condition) if resume_condition is not None else None
+        was_paused = False
         while not token.cancelled:
+            interval_s = max(pause_condition.poll_interval_ms, 10) / 1000.0
             token.sleep(interval_s)
             if token.cancelled:
                 return
             try:
-                if runtime.evaluate():
-                    logger.info("Macro '%s': stop condition met (%s)", macro_name, condition.description)
-                    token.cancel()
-                    return
+                holding = pause_runtime.evaluate()
             except Exception:  # pragma: no cover - transient capture failures
-                logger.exception("Macro '%s': stop-condition check failed", macro_name)
+                logger.exception("Macro '%s': pause-condition check failed", macro_name)
+                holding = False
+            if holding:
+                if not was_paused:
+                    logger.info("Macro '%s': paused (%s)", macro_name, pause_condition.description)
+                    token.pause()
+                    was_paused = True
+                continue
+            if was_paused:
+                if resume_runtime is not None:
+                    resume_interval = max(resume_condition.poll_interval_ms, 10) / 1000.0
+                    try:
+                        if not resume_runtime.evaluate():
+                            # Re-poll the resume rule on its own cadence while
+                            # the sequence stays paused (token.sleep honours
+                            # the pause flag, so this loop would otherwise be
+                            # stuck).
+                            token.sleep(resume_interval)
+                            continue
+                    except Exception:  # pragma: no cover - transient capture failures
+                        logger.exception("Macro '%s': resume-condition check failed", macro_name)
+                        token.sleep(resume_interval)
+                        continue
+                logger.info("Macro '%s': unpaused", macro_name)
+                token.unpause()
+                was_paused = False
 
     def _run_actions(self, actions: tuple[ActionConfig, ...], token: ExecutionToken) -> None:
         for action in actions:
+            if token.cancelled:
+                return
+            token.wait_if_paused()  # never fire actions while a pause condition holds
             if token.cancelled:
                 return
             perform_action(action)

@@ -1,8 +1,8 @@
-"""Macro editor: start/stop screen conditions, actions and input recording.
+"""Macro editor: pause/unpause screen conditions, actions and input recording.
 
 * :class:`ConditionEditor` (in :mod:`ui.condition_editor`) is embedded twice in
-  the macro dialog -- once as an optional *start condition* gate and once as a
-  *stop condition* interrupt.
+  the macro dialog -- once as an optional *pause condition* and once as the
+  *unpause condition* that must hold before a paused macro resumes.
 * :class:`ActionEditorDialog` -- edit one keyboard/mouse step; every action
   type shows only the fields it needs, and *Record* buttons capture live
   keyboard/mouse input through pynput.
@@ -795,13 +795,15 @@ class MacroEditorDialog(QDialog):
 
     Layout top-to-bottom:
 
-    * **General** -- name, start hotkey, repeat/loops/interval.
-    * **Start condition** (optional) -- a :class:`ScreenCondition` gate; when
-      enabled, the macro waits until the screen matches before running.  A
-      timeout can be configured so the wait eventually gives up.
-    * **Stop condition** (optional) -- a :class:`ScreenCondition` interrupt;
-      while the macro runs, this rule is polled and cancels it as soon as it
-      holds on screen.
+    * **General** -- name, start hotkey, repeat/loops/interval.  The user
+      turns the macro on and off; conditions never stop it.
+    * **Pause condition** (optional) -- a :class:`ScreenCondition`; while it
+      holds on screen the macro's actions are paused and they resume as soon
+      as it clears.  A timeout can be configured so the initial wait
+      eventually gives up.
+    * **Unpause condition** (optional) -- once the macro has been paused, this
+      rule must hold on screen before execution resumes (ignored without a
+      pause condition).
     * **Actions** -- an ordered table of keyboard/mouse steps with add/edit/
       remove/reorder controls plus a whole-session recorder.
     """
@@ -837,36 +839,36 @@ class MacroEditorDialog(QDialog):
         meta_box = QGroupBox("General")
         meta_box.setLayout(meta_form)
 
-        # -- start / stop conditions -----------------------------------
-        self._start_enabled = QCheckBox("Wait for a screen event before starting")
-        self._start_editor = ConditionEditor(show_timeout=True)
-        self._start_enabled.toggled.connect(self._start_editor.setVisible)
-        if macro.start_condition is not None:
-            self._start_enabled.setChecked(True)
-            self._start_editor.load(macro.start_condition)
+        # -- pause / unpause conditions ----------------------------------
+        self._pause_enabled = QCheckBox("Pause actions while this screen event is present")
+        self._pause_editor = ConditionEditor(show_timeout=True)
+        self._pause_enabled.toggled.connect(self._pause_editor.setVisible)
+        if macro.pause_condition is not None:
+            self._pause_enabled.setChecked(True)
+            self._pause_editor.load(macro.pause_condition)
         else:
-            self._start_editor.load(None)
-            self._start_editor.clear()
-            self._start_editor.setVisible(False)
-        start_box = QGroupBox("Start condition")
-        start_layout = QVBoxLayout(start_box)
-        start_layout.addWidget(self._start_enabled)
-        start_layout.addWidget(self._start_editor)
+            self._pause_editor.load(None)
+            self._pause_editor.clear()
+            self._pause_editor.setVisible(False)
+        pause_box = QGroupBox("Pause condition")
+        pause_layout = QVBoxLayout(pause_box)
+        pause_layout.addWidget(self._pause_enabled)
+        pause_layout.addWidget(self._pause_editor)
 
-        self._stop_enabled = QCheckBox("Stop automatically when the screen changes")
-        self._stop_editor = ConditionEditor(show_timeout=False)
-        self._stop_enabled.toggled.connect(self._stop_editor.setVisible)
-        if macro.stop_condition is not None:
-            self._stop_enabled.setChecked(True)
-            self._stop_editor.load(macro.stop_condition)
+        self._unpause_enabled = QCheckBox("Only resume once this screen event appears")
+        self._unpause_editor = ConditionEditor(show_timeout=False)
+        self._unpause_enabled.toggled.connect(self._unpause_editor.setVisible)
+        if macro.unpause_condition is not None:
+            self._unpause_enabled.setChecked(True)
+            self._unpause_editor.load(macro.unpause_condition)
         else:
-            self._stop_editor.load(None)
-            self._stop_editor.clear()
-            self._stop_editor.setVisible(False)
-        stop_box = QGroupBox("Stop condition")
-        stop_layout = QVBoxLayout(stop_box)
-        stop_layout.addWidget(self._stop_enabled)
-        stop_layout.addWidget(self._stop_editor)
+            self._unpause_editor.load(None)
+            self._unpause_editor.clear()
+            self._unpause_editor.setVisible(False)
+        unpause_box = QGroupBox("Unpause condition")
+        unpause_layout = QVBoxLayout(unpause_box)
+        unpause_layout.addWidget(self._unpause_enabled)
+        unpause_layout.addWidget(self._unpause_editor)
 
         # -- actions ---------------------------------------------------
         self._table = QTableWidget(0, 2)
@@ -904,8 +906,8 @@ class MacroEditorDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(meta_box)
-        layout.addWidget(start_box)
-        layout.addWidget(stop_box)
+        layout.addWidget(pause_box)
+        layout.addWidget(unpause_box)
         layout.addWidget(actions_box, 1)
         layout.addWidget(buttons)
 
@@ -995,20 +997,27 @@ class MacroEditorDialog(QDialog):
             loops=self._loops.value(),
             interval_ms=self._interval.value(),
             actions=tuple(self._actions),
-            start_condition=self._build_start_condition(),
-            stop_condition=self._build_stop_condition(),
+            pause_condition=self._build_pause_condition(),
+            unpause_condition=self._build_unpause_condition(),
         )
 
-    def _build_start_condition(self):
-        """Return the enabled start condition, or ``None`` when disabled/empty."""
-        if not self._start_enabled.isChecked():
+    def _build_pause_condition(self):
+        """Return the enabled pause condition, or ``None`` when disabled/empty."""
+        if not self._pause_enabled.isChecked():
             return None
-        condition = self._start_editor.build()
+        condition = self._pause_editor.build()
         return condition if condition.configured else None
 
-    def _build_stop_condition(self):
-        """Return the enabled stop condition, or ``None`` when disabled/empty."""
-        if not self._stop_enabled.isChecked():
+    def _build_unpause_condition(self):
+        """Return the enabled unpause condition, or ``None`` when disabled/empty.
+
+        The unpause rule only makes sense together with a pause condition --
+        without one there is nothing to hold execution back -- so it is
+        dropped when the pause condition is off.
+        """
+        if not self._unpause_enabled.isChecked():
             return None
-        condition = self._stop_editor.build()
+        if not self._pause_enabled.isChecked():
+            return None
+        condition = self._unpause_editor.build()
         return condition if condition.configured else None

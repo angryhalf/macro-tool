@@ -7,7 +7,7 @@ target macro and/or runs its own action list through the
 :class:`~core.macro_engine.MacroEngine`.
 
 The detection primitives themselves live in
-:mod:`core.screen_watch` so macros' start/stop conditions can share them.
+:mod:`core.screen_watch` so macros' pause/unpause conditions can share them.
 """
 
 from __future__ import annotations

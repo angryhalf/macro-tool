@@ -1,6 +1,6 @@
 """Screen-condition evaluation: image matching and change detection.
 
-This module is shared by the macro engine (start/stop conditions) and the
+This module is shared by the macro engine (pause/unpause conditions) and the
 background watcher engine.  Two kinds of checks are supported:
 
 * ``image_found`` / ``image_missing`` -- OpenCV template matching against a
