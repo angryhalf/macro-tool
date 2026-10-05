@@ -18,7 +18,10 @@ from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QWidget
 
-from services.screen_capture import bgr_to_qimage, grab_full_screen
+from services.screen_capture import (
+    bgr_to_qimage,
+    grab_primary_screen_via_qt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +44,17 @@ class _RubberBandCanvas(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
+    def set_image(self, image: QImage, offset: QPoint) -> None:
+        """Replace the frozen background screenshot."""
+        self._image = image
+        self._offset = offset
+        self.update()
+
     # -- painting -----------------------------------------------------
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         painter = QPainter(self)
-        painter.drawImage(0, 0, self._image)
+        if not self._image.isNull():
+            painter.drawImage(0, 0, self._image)
 
         if not self._current.isNull():
             painter.fillRect(self.rect(), QColor(0, 0, 0, 130))
@@ -111,39 +121,55 @@ class RegionPickerDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
         self._selected: QRect | None = None
-        image, origin = self._grab_virtual_desktop()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._canvas = _RubberBandCanvas(image, origin, self)
+        # Canvas is created lazily in showEvent with a *live* screenshot; a
+        # blank placeholder keeps the layout valid until then.
+        self._canvas = _RubberBandCanvas(QImage(), QPoint(0, 0), self)
         self._canvas.selection_done.connect(self._on_selection)
         self._canvas.selection_cancelled.connect(self.reject)
         layout.addWidget(self._canvas)
 
         self.setGeometry(QApplication.primaryScreen().virtualGeometry())
         self.showFullScreen()
+        self.activateWindow()
+        self.raise_()
+
+    # -- live background ------------------------------------------------
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """Grab the desktop *after* the window exists, then hand focus to the canvas."""
+        super().showEvent(event)
+        image, origin = self._grab_virtual_desktop()
+        self._canvas.set_image(image, origin)
         self._canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._canvas.update()
 
     # ------------------------------------------------------------------
     @staticmethod
     def _grab_virtual_desktop() -> tuple[QImage, QPoint]:
-        """Capture the screen behind us; returns (image, top-left in global coords)."""
+        """Capture the desktop behind us; returns (image, top-left in global coords).
+
+        Uses Qt's own screen grab so the frozen background and the returned
+        coordinates share the same DPI-independent coordinate space as the
+        overlay window itself.
+        """
         geometry = QApplication.primaryScreen().virtualGeometry()
         primary = QApplication.primaryScreen().geometry()
         try:
-            frame = grab_full_screen()
+            frame = grab_primary_screen_via_qt()
         except Exception:  # pragma: no cover - transient capture failures
             logger.exception("Screen capture failed, using blank picker background")
             frame = None
-        if frame is None:
+        if frame is None or frame.size == 0:
             image = QImage(geometry.size(), QImage.Format.Format_RGB888)
             image.fill(QColor(20, 20, 20))
             return image, geometry.topLeft()
         canvas = QImage(geometry.size(), QImage.Format.Format_RGB888)
         canvas.fill(QColor(20, 20, 20))
         painter = QPainter(canvas)
-        # mss captures the primary monitor; align it with its global position.
+        # Place the primary-monitor shot at its position within the virtual desktop.
         painter.drawImage(primary.topLeft() - geometry.topLeft(), bgr_to_qimage(frame))
         painter.end()
         return canvas, geometry.topLeft()

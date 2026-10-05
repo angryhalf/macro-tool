@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import logging
 
-import numpy as np
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeyEvent, QImage
-from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+from PySide6.QtGui import QKeyEvent
+from PySide6.QtWidgets import (
+    QApplication,
+    QMessageBox,
+    QPushButton,
+    QWidget,
+)
 
 from services.input import describe_hotkey
+from services.screen_capture import grab_primary_screen_via_qt
 
 logger = logging.getLogger(__name__)
 
@@ -138,31 +143,12 @@ class HotkeyButton(QPushButton):
         return "+".join(parts)
 
 
-def _grab_primary_screen():
-    """Capture the primary monitor via Qt (works on Windows/macOS/Linux)."""
-    screen = QApplication.primaryScreen()
-    pixmap = screen.grabWindow(0)
-    image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
-    width, height = image.width(), image.height()
-    buffer = image.constBits()
-    array = np.frombuffer(buffer, dtype=np.uint8, count=image.sizeInBytes()).reshape(
-        (height, image.bytesPerLine() // 4, 4)
-    )[:, :width]
-    return np.ascontiguousarray(array[..., :3], dtype=np.uint8)
-
-
 def grab_screen_for_crop():
     """Return a BGR numpy array of the primary screen, or ``None`` on failure."""
     try:
-        return _grab_primary_screen()
-    except Exception:  # pragma: no cover - platform capture quirks
-        logger.exception("Qt screen grab failed, falling back to mss")
-    try:
-        from services.screen_capture import grab_full_screen
-
-        return grab_full_screen()
+        return grab_primary_screen_via_qt()
     except Exception:  # pragma: no cover - headless / permission issues
-        logger.exception("mss screen grab failed too")
+        logger.exception("Qt screen grab failed")
         return None
 
 
@@ -180,11 +166,22 @@ def crop_and_save_template(parent: QWidget | None, save_path: str) -> bool:
     left, top, width, height = rect
     frame = grab_screen_for_crop()
     if frame is None:
+        QMessageBox.warning(
+            parent,
+            "Capture failed",
+            "The screen could not be captured, so the template was not saved.",
+        )
         return False
     # Qt grabs start at the primary monitor's origin; translate global coords.
     origin = QApplication.primaryScreen().geometry().topLeft()
-    crop = frame[top - origin.y() : top - origin.y() + height,
-                 left - origin.x() : left - origin.x() + width]
+    x0 = max(left - origin.x(), 0)
+    y0 = max(top - origin.y(), 0)
+    crop = frame[y0 : top - origin.y() + height, x0 : left - origin.x() + width]
     if crop.size == 0:
+        QMessageBox.warning(
+            parent,
+            "Capture failed",
+            "The selected region fell outside the captured screen.",
+        )
         return False
     return save_template(crop, save_path)

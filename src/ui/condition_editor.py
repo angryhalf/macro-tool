@@ -9,6 +9,7 @@ timeout.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
@@ -26,6 +27,8 @@ from PySide6.QtWidgets import (
 
 from app.conditions import ScreenCondition
 from ui.widgets import crop_and_save_template
+
+logger = logging.getLogger(__name__)
 
 MODE_LABELS: dict[str, str] = {
     "Image appears": "image_found",
@@ -174,9 +177,20 @@ class ConditionEditor(QWidget):
             self.template_label.setText(Path(path).name)
 
     def _pick_region(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
         from services.region_picker import RegionPickerDialog
 
-        rect = RegionPickerDialog.pick(self)
+        try:
+            rect = RegionPickerDialog.pick(self)
+        except Exception:  # pragma: no cover - never leave the button dead
+            logger.exception("Region picker failed")
+            QMessageBox.warning(
+                self,
+                "Region picker",
+                "The screen region picker could not be opened.",
+            )
+            return
         if rect is not None:
             self._region = rect
             self._update_region_label()
