@@ -9,7 +9,7 @@ modes are supported:
   which reacts to any visual change inside the watched rectangle.
 
 When a watcher fires it starts its target macro and/or runs its own action
-list through the :class:`~src.core.macro_engine.MacroEngine`.
+list through the :class:`~core.macro_engine.MacroEngine`.
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ import cv2
 import mss
 import numpy as np
 
-from src.app.settings import WatcherConfig
-from src.core.macro_engine import MacroEngine
+from app.settings import WatcherConfig
+from core.macro_engine import MacroEngine
 
 logger = logging.getLogger(__name__)
 

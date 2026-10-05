@@ -15,8 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.app.settings import MacroConfig
-from src.ui.macro_editor import MacroEditorDialog
+from app.settings import MacroConfig
+from ui.macro_editor import MacroEditorDialog
 
 
 class MacrosTab(QWidget):

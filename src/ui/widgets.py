@@ -6,8 +6,8 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeyEvent, QPixmap
 from PySide6.QtWidgets import QPushButton, QWidget
 
-from src.services.input import describe_hotkey
-from src.services.screen_capture import bgr_to_qimage, grab_full_screen
+from services.input import describe_hotkey
+from services.screen_capture import bgr_to_qimage, grab_full_screen
 
 # Qt keys that have no printable text mapped to pynput key names.
 _QT_KEY_NAMES: dict[Qt.Key, str] = {
@@ -180,8 +180,8 @@ def crop_and_save_template(parent: QWidget | None, save_path: str) -> bool:
 
     Returns True when a crop was captured and written to *save_path*.
     """
-    from src.services.region_picker import RegionPickerDialog
-    from src.services.screen_capture import save_template
+    from services.region_picker import RegionPickerDialog
+    from services.screen_capture import save_template
 
     rect = RegionPickerDialog.pick(parent)
     if rect is None:

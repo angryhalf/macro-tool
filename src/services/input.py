@@ -5,7 +5,7 @@ synthesis (macro actions) and global hotkey listening.  Keeping it isolated
 behind small, typed helpers makes the rest of the code base independent from
 the pynput API:
 
-* :func:`perform_action` -- execute one :class:`~src.app.settings.ActionConfig`.
+* :func:`perform_action` -- execute one :class:`~app.settings.ActionConfig`.
 * :class:`HotkeyManager` -- register/replace global hotkeys from any thread.
 * :func:`current_mouse_position` -- read the live pointer position.
 """
@@ -20,7 +20,7 @@ from typing import Callable, Iterable
 from pynput import keyboard as kb
 from pynput import mouse as ms
 
-from src.app.settings import ActionConfig
+from app.settings import ActionConfig
 
 logger = logging.getLogger(__name__)
 

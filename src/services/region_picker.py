@@ -11,7 +11,7 @@ from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QDialog, QWidget
 
-from src.services.screen_capture import bgr_to_qimage, grab_full_screen
+from services.screen_capture import bgr_to_qimage, grab_full_screen
 
 _BORDER_PX = 2
 

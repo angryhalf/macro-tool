@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.app.settings import (
+from app.settings import (
     AppSettings,
     MacroConfig,
     WatcherConfig,
@@ -26,12 +26,12 @@ from src.app.settings import (
     rename_in_settings,
     save_settings,
 )
-from src.core.macro_engine import MacroEngine
-from src.core.watcher_engine import ScreenWatcherEngine
-from src.services.input import describe_hotkey
-from src.ui.macros_tab import MacrosTab
-from src.ui.settings_tab import SettingsTab
-from src.ui.watchers_tab import WatchersTab
+from core.macro_engine import MacroEngine
+from core.watcher_engine import ScreenWatcherEngine
+from services.input import describe_hotkey
+from ui.macros_tab import MacrosTab
+from ui.settings_tab import SettingsTab
+from ui.watchers_tab import WatchersTab
 
 logger = logging.getLogger(__name__)
 
