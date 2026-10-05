@@ -3,6 +3,14 @@
 The :class:`MacroEngine` runs action sequences on a worker thread, supports
 looping/repeat, hotkey-triggered starts, and an emergency stop that works
 from any thread (GUI button or global hotkey).
+
+Macros can additionally be gated by screen conditions:
+
+* **start condition** -- the macro waits (polling the screen) until the
+  condition holds before running its first action; an optional timeout gives
+  up waiting.
+* **stop condition** -- while the macro runs, a monitor thread polls the
+  screen and cancels the macro as soon as the condition holds.
 """
 
 from __future__ import annotations
@@ -10,6 +18,7 @@ from __future__ import annotations
 import logging
 import threading
 
+from app.conditions import ConditionRuntime
 from app.settings import ActionConfig, AppSettings, MacroConfig
 from services.input import HotkeyManager, perform_action
 
@@ -95,6 +104,10 @@ class MacroEngine:
         if not macro.actions:
             logger.info("Macro '%s' has no actions", macro.name)
             return None
+        if macro.start_condition is not None and not macro.start_condition.configured:
+            logger.warning("Macro '%s': start condition is incomplete", macro.name)
+        if macro.stop_condition is not None and not macro.stop_condition.configured:
+            logger.warning("Macro '%s': stop condition is incomplete", macro.name)
         token = ExecutionToken()
         thread = threading.Thread(
             target=self._run_macro,
@@ -148,10 +161,13 @@ class MacroEngine:
     # Worker bodies
     # ------------------------------------------------------------------
     def _run_macro(self, macro: MacroConfig, token: ExecutionToken, initial_delay_s: float) -> None:
+        monitor = self._start_stop_monitor(macro, token)
         try:
             if initial_delay_s > 0:
                 logger.info("Macro '%s' starts in %.1fs", macro.name, initial_delay_s)
                 token.sleep(initial_delay_s)
+            if not self._await_start_condition(macro, token):
+                return
             loops = 0
             while not token.cancelled:
                 self._run_actions(macro.actions, token)
@@ -167,7 +183,66 @@ class MacroEngine:
         except Exception:  # pragma: no cover - defensive logging
             logger.exception("Macro '%s' crashed", macro.name)
         finally:
+            if monitor is not None:
+                monitor.join(timeout=2.0)
             self._finish(token)
+
+    def _await_start_condition(self, macro: MacroConfig, token: ExecutionToken) -> bool:
+        """Block until the macro's start condition holds.
+
+        Returns True when execution may proceed, False when the macro was
+        cancelled or the wait timed out.
+        """
+        condition = macro.start_condition
+        if condition is None or not condition.configured or token.cancelled:
+            return not token.cancelled
+        runtime = ConditionRuntime.create(condition, timeout_s=condition.timeout_ms / 1000.0)
+        interval_s = max(condition.poll_interval_ms, 10) / 1000.0
+        logger.info("Macro '%s' waiting for start condition: %s", macro.name, condition.description)
+        while not token.cancelled:
+            if runtime.expired():
+                logger.info("Macro '%s': start-condition timeout reached, skipping", macro.name)
+                return False
+            token.sleep(interval_s)
+            if token.cancelled:
+                return False
+            try:
+                if runtime.evaluate():
+                    logger.info("Macro '%s': start condition met", macro.name)
+                    return True
+            except Exception:  # pragma: no cover - transient capture failures
+                logger.exception("Macro '%s': start-condition check failed", macro.name)
+        return False
+
+    def _start_stop_monitor(self, macro: MacroConfig, token: ExecutionToken) -> threading.Thread | None:
+        """Poll the stop condition in the background; cancel *token* when it holds."""
+        condition = macro.stop_condition
+        if condition is None or not condition.configured:
+            return None
+        thread = threading.Thread(
+            target=self._monitor_stop_condition,
+            args=(macro.name, condition, token),
+            name=f"stop-monitor-{macro.name}",
+            daemon=True,
+        )
+        thread.start()
+        return thread
+
+    @staticmethod
+    def _monitor_stop_condition(macro_name: str, condition, token: ExecutionToken) -> None:
+        runtime = ConditionRuntime.create(condition)
+        interval_s = max(condition.poll_interval_ms, 10) / 1000.0
+        while not token.cancelled:
+            token.sleep(interval_s)
+            if token.cancelled:
+                return
+            try:
+                if runtime.evaluate():
+                    logger.info("Macro '%s': stop condition met (%s)", macro_name, condition.description)
+                    token.cancel()
+                    return
+            except Exception:  # pragma: no cover - transient capture failures
+                logger.exception("Macro '%s': stop-condition check failed", macro_name)
 
     def _run_actions(self, actions: tuple[ActionConfig, ...], token: ExecutionToken) -> None:
         for action in actions:

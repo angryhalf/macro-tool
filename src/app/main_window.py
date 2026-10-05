@@ -73,7 +73,7 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
         tabs.addTab(self.macros_tab, "Macros")
-        tabs.addTab(self.watchers_tab, "Screen watchers")
+        tabs.addTab(self.watchers_tab, "Advanced watchers")
         tabs.addTab(self.settings_tab, "Settings")
 
         # -- top bar ---------------------------------------------------

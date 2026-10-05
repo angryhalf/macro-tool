@@ -35,8 +35,10 @@ class MacrosTab(QWidget):
         self._stop_hotkey_provider = stop_hotkey_provider
         self._macros: list[MacroConfig] = []
 
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["Name", "Hotkey", "Loops", "Actions"])
+        self._table = QTableWidget(0, 6)
+        self._table.setHorizontalHeaderLabels(
+            ["Name", "Hotkey", "Loops", "Actions", "Start condition", "Stop condition"]
+        )
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -110,6 +112,8 @@ class MacrosTab(QWidget):
                 loops=copy.loops,
                 interval_ms=copy.interval_ms,
                 actions=copy.actions,
+                start_condition=copy.start_condition,
+                stop_condition=copy.stop_condition,
             )
         )
         self._commit()
@@ -141,6 +145,13 @@ class MacrosTab(QWidget):
         self._table.setRowCount(len(self._macros))
         for row, macro in enumerate(self._macros):
             loops = "∞" if macro.repeat else str(macro.loops)
-            values = (macro.name, macro.start_hotkey or "—", loops, str(len(macro.actions)))
+            values = (
+                macro.name,
+                macro.start_hotkey or "—",
+                loops,
+                str(len(macro.actions)),
+                macro.start_condition.description if macro.start_condition else "—",
+                macro.stop_condition.description if macro.stop_condition else "—",
+            )
             for column, value in enumerate(values):
                 self._table.setItem(row, column, QTableWidgetItem(value))

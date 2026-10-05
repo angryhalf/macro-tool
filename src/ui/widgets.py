@@ -155,7 +155,10 @@ class RegionPreviewWidget(QWidget):
 
     # -- public --------------------------------------------------------
     def refresh(self) -> None:
-        frame = grab_full_screen()
+        try:
+            frame = grab_full_screen()
+        except Exception:  # pragma: no cover - transient capture failures
+            return
         self._pixmap = QPixmap.fromImage(bgr_to_qimage(frame)).scaled(
             self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         )

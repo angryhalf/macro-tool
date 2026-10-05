@@ -1,11 +1,15 @@
-"""Editors for macros and their actions.
+"""Macro editor: start/stop screen conditions, actions and input recording.
 
+* :class:`ConditionEditor` (in :mod:`ui.condition_editor`) is embedded twice in
+  the macro dialog -- once as an optional *start condition* gate and once as a
+  *stop condition* interrupt.
 * :class:`ActionEditorDialog` -- edit one keyboard/mouse step; every action
   type shows only the fields it needs, and *Record* buttons capture live
   keyboard/mouse input through pynput.
 * :class:`MacroRecorderDialog` -- record an entire input session (keys,
   clicks, moves, scrolls, timings) into an ordered action list in one go.
-* :class:`MacroEditorDialog` -- edit a macro: metadata plus its action table.
+* :class:`MacroEditorDialog` -- edit a macro: metadata, conditions, plus its
+  action table.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -36,6 +41,7 @@ from PySide6.QtWidgets import (
 
 from app.settings import ActionConfig, MacroConfig
 from services.input import InputRecorder, current_mouse_position
+from ui.condition_editor import ConditionEditor
 from ui.widgets import HotkeyButton
 
 #: Human label -> action kind understood by ``services.input.perform_action``.
@@ -785,7 +791,20 @@ def _describe_event(kind: str, payload: dict) -> str:
 # Macro editor
 # ----------------------------------------------------------------------
 class MacroEditorDialog(QDialog):
-    """Edit one macro: name, hotkey, loop options and its action sequence."""
+    """Edit one macro.
+
+    Layout top-to-bottom:
+
+    * **General** -- name, start hotkey, repeat/loops/interval.
+    * **Start condition** (optional) -- a :class:`ScreenCondition` gate; when
+      enabled, the macro waits until the screen matches before running.  A
+      timeout can be configured so the wait eventually gives up.
+    * **Stop condition** (optional) -- a :class:`ScreenCondition` interrupt;
+      while the macro runs, this rule is polled and cancels it as soon as it
+      holds on screen.
+    * **Actions** -- an ordered table of keyboard/mouse steps with add/edit/
+      remove/reorder controls plus a whole-session recorder.
+    """
 
     def __init__(
         self,
@@ -796,8 +815,9 @@ class MacroEditorDialog(QDialog):
         super().__init__(parent)
         self._stop_hotkey = stop_hotkey
         self.setWindowTitle(f"Edit macro — {macro.name}")
-        self.setMinimumSize(640, 460)
+        self.setMinimumSize(680, 620)
 
+        # -- general ---------------------------------------------------
         self._name = QLineEdit(macro.name)
         self._hotkey = HotkeyButton(macro.start_hotkey)
         self._repeat = QCheckBox("Repeat until stopped")
@@ -808,13 +828,47 @@ class MacroEditorDialog(QDialog):
         self._interval = QSpinBox(minimum=0, maximum=600_000, value=macro.interval_ms)
         self._interval.setSuffix(" ms")
 
-        meta = QFormLayout()
-        meta.addRow("Name:", self._name)
-        meta.addRow("Start hotkey:", self._hotkey)
-        meta.addRow("Repeat:", self._repeat)
-        meta.addRow("Loops:", self._loops)
-        meta.addRow("Loop interval:", self._interval)
+        meta_form = QFormLayout()
+        meta_form.addRow("Name:", self._name)
+        meta_form.addRow("Start hotkey:", self._hotkey)
+        meta_form.addRow("Repeat:", self._repeat)
+        meta_form.addRow("Loops:", self._loops)
+        meta_form.addRow("Loop interval:", self._interval)
+        meta_box = QGroupBox("General")
+        meta_box.setLayout(meta_form)
 
+        # -- start / stop conditions -----------------------------------
+        self._start_enabled = QCheckBox("Wait for a screen event before starting")
+        self._start_editor = ConditionEditor(show_timeout=True)
+        self._start_enabled.toggled.connect(self._start_editor.setVisible)
+        if macro.start_condition is not None:
+            self._start_enabled.setChecked(True)
+            self._start_editor.load(macro.start_condition)
+        else:
+            self._start_editor.load(None)
+            self._start_editor.clear()
+            self._start_editor.setVisible(False)
+        start_box = QGroupBox("Start condition")
+        start_layout = QVBoxLayout(start_box)
+        start_layout.addWidget(self._start_enabled)
+        start_layout.addWidget(self._start_editor)
+
+        self._stop_enabled = QCheckBox("Stop automatically when the screen changes")
+        self._stop_editor = ConditionEditor(show_timeout=False)
+        self._stop_enabled.toggled.connect(self._stop_editor.setVisible)
+        if macro.stop_condition is not None:
+            self._stop_enabled.setChecked(True)
+            self._stop_editor.load(macro.stop_condition)
+        else:
+            self._stop_editor.load(None)
+            self._stop_editor.clear()
+            self._stop_editor.setVisible(False)
+        stop_box = QGroupBox("Stop condition")
+        stop_layout = QVBoxLayout(stop_box)
+        stop_layout.addWidget(self._stop_enabled)
+        stop_layout.addWidget(self._stop_editor)
+
+        # -- actions ---------------------------------------------------
         self._table = QTableWidget(0, 2)
         self._table.setHorizontalHeaderLabels(["Action", "Details"])
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -839,14 +893,20 @@ class MacroEditorDialog(QDialog):
         record_button.clicked.connect(self._record_inputs)
         toolbar.addWidget(record_button)
 
+        actions_box = QGroupBox("Actions")
+        actions_layout = QVBoxLayout(actions_box)
+        actions_layout.addLayout(toolbar)
+        actions_layout.addWidget(self._table)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(meta)
-        layout.addLayout(toolbar)
-        layout.addWidget(self._table)
+        layout.addWidget(meta_box)
+        layout.addWidget(start_box)
+        layout.addWidget(stop_box)
+        layout.addWidget(actions_box, 1)
         layout.addWidget(buttons)
 
         self._actions: list[ActionConfig] = list(macro.actions)
@@ -927,6 +987,7 @@ class MacroEditorDialog(QDialog):
 
     # ------------------------------------------------------------------
     def macro(self) -> MacroConfig:
+        """Build the :class:`MacroConfig` described by this dialog."""
         return MacroConfig(
             name=self._name.text().strip() or "Unnamed macro",
             start_hotkey=self._hotkey.hotkey,
@@ -934,4 +995,20 @@ class MacroEditorDialog(QDialog):
             loops=self._loops.value(),
             interval_ms=self._interval.value(),
             actions=tuple(self._actions),
+            start_condition=self._build_start_condition(),
+            stop_condition=self._build_stop_condition(),
         )
+
+    def _build_start_condition(self):
+        """Return the enabled start condition, or ``None`` when disabled/empty."""
+        if not self._start_enabled.isChecked():
+            return None
+        condition = self._start_editor.build()
+        return condition if condition.configured else None
+
+    def _build_stop_condition(self):
+        """Return the enabled stop condition, or ``None`` when disabled/empty."""
+        if not self._stop_enabled.isChecked():
+            return None
+        condition = self._stop_editor.build()
+        return condition if condition.configured else None

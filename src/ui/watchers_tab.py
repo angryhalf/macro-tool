@@ -1,163 +1,85 @@
-"""Watchers tab: define screen-reaction rules (image found / region changed)."""
+"""Advanced watchers tab: standalone background screen triggers.
+
+The primary way to react to the screen is via a macro's own start/stop
+conditions (see :mod:`ui.macro_editor`).  This tab offers an additional,
+always-on watcher that can *launch* a macro or run inline actions when a
+:class:`~app.conditions.ScreenCondition` fires -- useful for one-off
+reactions that shouldn't be tied to a specific macro's lifecycle.
+"""
 
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QPushButton,
-    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from app.settings import WatcherConfig
+from ui.condition_editor import ConditionEditor
 from ui.macro_editor import ActionEditorDialog
-from ui.widgets import RegionPreviewWidget, crop_and_save_template
-
-MODE_LABELS = {
-    "Image appears": "image_found",
-    "Image disappears": "image_missing",
-    "Region changes": "region_changed",
-}
-TEMPLATES_DIR = Path("templates")
 
 
-class WatcherEditorDialog(QWidget):
+class _WatcherEditor(QWidget):
     """Inline editor bound to one watcher config."""
 
     def __init__(self, macros_provider: Callable[[], list[str]], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._macros_provider = macros_provider
-        self._config = WatcherConfig()
-        self._template_path = ""
+        self._actions: list = []
 
         self.name_edit = QLineEdit()
-        self.mode_combo = QComboBox()
-        for label, mode in MODE_LABELS.items():
-            self.mode_combo.addItem(label, mode)
-        self.mode_combo.currentIndexChanged.connect(self._update_mode_visibility)
-
-        self.template_label = QLabel("No template selected")
-        self.template_label.setStyleSheet("color: gray;")
-        self.preview = RegionPreviewWidget()
-        self.capture_button = QPushButton("Capture template from screen…")
-        self.capture_button.clicked.connect(self._capture_template)
-        self.load_button = QPushButton("Load file…")
-        self.load_button.clicked.connect(self._load_file)
-
-        self.confidence_slider = QSlider(Qt.Orientation.Horizontal)
-        self.confidence_slider.setRange(50, 100)
-        self.confidence_slider.setValue(85)
-        self.confidence_value = QLabel("0.85")
-        self.confidence_slider.valueChanged.connect(
-            lambda v: self.confidence_value.setText(f"{v / 100:.2f}")
-        )
-
-        self.poll_interval = QSpinBox(minimum=50, maximum=10_000, singleStep=50, value=200)
+        self.condition = ConditionEditor(show_timeout=False)
         self.cooldown = QSpinBox(minimum=0, maximum=600_000, value=1000)
-        self.change_threshold = QDoubleSpinBox(decimals=1, minimum=0.1, maximum=255.0, value=5.0)
-
-        self.region_label = QLabel("Full screen")
-        self.pick_region_button = QPushButton("Pick region…")
-        self.pick_region_button.clicked.connect(self._pick_region)
-        self._region: tuple[int, int, int, int] | None = None
-
+        self.cooldown.setSuffix(" ms")
         self.auto_start = QCheckBox("Auto-start when the app launches")
         self.target_macro = QComboBox()
-        self.refresh_macros()
-
         self.actions_summary = QLabel("No direct actions")
         add_action = QPushButton("Add action…")
         add_action.clicked.connect(self._add_action)
-        clear_action = QPushButton("Clear actions")
-        clear_action.clicked.connect(self._clear_actions)
-        self._actions: list = []
+        clear_actions = QPushButton("Clear actions")
+        clear_actions.clicked.connect(self._clear_actions)
 
-        form = QFormLayout()
+        self.refresh_macros()
+
+        form = QFormLayout(self)
         form.addRow("Name:", self.name_edit)
-        form.addRow("Trigger when:", self.mode_combo)
-        form.addRow("Template:", self.template_label)
-        template_row = QHBoxLayout()
-        template_row.addWidget(self.capture_button)
-        template_row.addWidget(self.load_button)
-        form.addRow("", template_row)
-        form.addRow(self.preview)
-        form.addRow("Match confidence:", self._row(self.confidence_slider, self.confidence_value))
-        form.addRow("Poll interval (ms):", self.poll_interval)
-        form.addRow("Cooldown (ms):", self.cooldown)
-        form.addRow("Change sensitivity:", self.change_threshold)
-        form.addRow("Watched region:", self._row(self.region_label, self.pick_region_button))
+        form.addRow("Cooldown between triggers:", self.cooldown)
         form.addRow("Then run macro:", self.target_macro)
         actions_row = QHBoxLayout()
         actions_row.addWidget(self.actions_summary)
         actions_row.addWidget(add_action)
-        actions_row.addWidget(clear_action)
+        actions_row.addWidget(clear_actions)
         form.addRow("Extra actions:", actions_row)
         form.addRow(self.auto_start)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self._save_clicked)
-        buttons.rejected.connect(self._cancel_clicked)
-        self._save_cb: Callable[[WatcherConfig], None] | None = None
-        self._cancel_cb: Callable[[], None] | None = None
-
-        layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
-        self._update_mode_visibility()
-
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _row(*widgets: QWidget) -> QWidget:
-        container = QWidget()
-        row = QHBoxLayout(container)
-        row.setContentsMargins(0, 0, 0, 0)
-        for widget in widgets:
-            row.addWidget(widget, 1 if len(widgets) == 2 else 0)
-        if len(widgets) == 2:
-            row.setStretchFactor(widgets[0], 3)
-            row.setStretchFactor(widgets[1], 1)
-        return container
-
-    # ------------------------------------------------------------------
-    # Editor population
     # ------------------------------------------------------------------
     def load_config(self, config: WatcherConfig) -> None:
-        self._config = config
         self.name_edit.setText(config.name)
-        index = self.mode_combo.findData(config.mode)
-        self.mode_combo.setCurrentIndex(max(0, index))
-        self._template_path = config.template_path
-        self.template_label.setText(Path(config.template_path).name or "No template selected")
-        self.confidence_slider.setValue(int(config.confidence * 100))
-        self.poll_interval.setValue(config.poll_interval_ms)
+        self.condition.load(config.condition)
         self.cooldown.setValue(config.cooldown_ms)
-        self.change_threshold.setValue(config.change_threshold)
-        self._region = config.region
-        self.region_label.setText(str(config.region))
         self.auto_start.setChecked(config.auto_start)
         self.refresh_macros()
         self.target_macro.setCurrentText(config.target_macro)
         self._actions = list(config.actions)
         self._update_actions_summary()
-        self._update_mode_visibility()
 
-    def blank(self) -> None:
-        self.load_config(WatcherConfig(name=f"Watcher {time.strftime('%H:%M:%S')}"))
+    def blank(self) -> WatcherConfig:
+        draft = WatcherConfig(name=f"Watcher {time.strftime('%H:%M:%S')}")
+        self.load_config(draft)
+        return draft
 
     def refresh_macros(self) -> None:
         current = self.target_macro.currentText()
@@ -169,71 +91,15 @@ class WatcherEditorDialog(QWidget):
         self.target_macro.setCurrentIndex(index if index >= 0 else 0)
         self.target_macro.blockSignals(False)
 
-    # ------------------------------------------------------------------
-    # Callbacks wired by the owner tab
-    # ------------------------------------------------------------------
-    def set_callbacks(self, on_save: Callable[[WatcherConfig], None], on_cancel: Callable[[], None]) -> None:
-        self._save_cb = on_save
-        self._cancel_cb = on_cancel
-
-    def _save_clicked(self) -> None:
-        if self._save_cb:
-            self._save_cb(self.build_config())
-
-    def _cancel_clicked(self) -> None:
-        if self._cancel_cb:
-            self._cancel_cb()
-
     def build_config(self) -> WatcherConfig:
-        mode = self.mode_combo.currentData()
         return WatcherConfig(
             name=self.name_edit.text().strip() or "Unnamed watcher",
-            mode=mode,
-            template_path=self._template_path,
-            confidence=self.confidence_slider.value() / 100.0,
-            poll_interval_ms=self.poll_interval.value(),
+            condition=self.condition.build(),
             cooldown_ms=self.cooldown.value(),
-            change_threshold=self.change_threshold.value(),
             auto_start=self.auto_start.isChecked(),
             target_macro="" if self.target_macro.currentIndex() == 0 else self.target_macro.currentText(),
             actions=tuple(self._actions),
-            region=self._region or (0, 0, 1920, 1080),
         )
-
-    # ------------------------------------------------------------------
-    # Slots
-    # ------------------------------------------------------------------
-    def _update_mode_visibility(self) -> None:
-        uses_template = self.mode_combo.currentData() != "region_changed"
-        self.template_label.setVisible(uses_template)
-        self.capture_button.setVisible(uses_template)
-        self.load_button.setVisible(uses_template)
-        self.confidence_slider.setVisible(uses_template)
-        self.confidence_value.setVisible(uses_template)
-        self.change_threshold.setVisible(not uses_template)
-
-    def _capture_template(self) -> None:
-        TEMPLATES_DIR.mkdir(exist_ok=True)
-        path = str(TEMPLATES_DIR / f"template_{int(time.time())}.png")
-        if crop_and_save_template(self, path):
-            self._template_path = path
-            self.template_label.setText(Path(path).name)
-
-    def _load_file(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
-
-        path, _ = QFileDialog.getOpenFileName(self, "Load template", str(TEMPLATES_DIR), "Images (*.png *.jpg *.bmp)")
-        if path:
-            self._template_path = path
-            self.template_label.setText(Path(path).name)
-
-    def _pick_region(self) -> None:
-        from services.region_picker import RegionPickerDialog
-
-        rect = RegionPickerDialog.pick(self)
-        if rect is not None:
-            self._region = rect
-            self.region_label.setText(str(rect))
 
     def _add_action(self) -> None:
         dialog = ActionEditorDialog(parent=self.window())
@@ -251,7 +117,7 @@ class WatcherEditorDialog(QWidget):
 
 
 class WatchersTab(QWidget):
-    """Left list of watchers + right inline editor."""
+    """Left list of watchers + right inline editor + start/stop controls."""
 
     def __init__(
         self,
@@ -267,6 +133,13 @@ class WatchersTab(QWidget):
         self._on_stop = on_stop
         self._watchers: list[WatcherConfig] = []
         self._editing_name: str | None = None
+
+        self._hint = QLabel(
+            "<i>Tip: most reactions belong inside a macro's Start / Stop "
+            "condition. Use this tab only for always-on triggers that should "
+            "launch other macros.</i>"
+        )
+        self._hint.setWordWrap(True)
 
         self._list = QListWidget()
         self._list.currentItemChanged.connect(self._on_selection)
@@ -284,8 +157,7 @@ class WatchersTab(QWidget):
         left_widget.setLayout(left)
         left_widget.setMaximumWidth(240)
 
-        self._editor = WatcherEditorDialog(macros_provider)
-        self._editor.set_callbacks(self._save_editor, lambda: None)
+        self._editor = _WatcherEditor(macros_provider)
 
         self._start_button = QPushButton("▶ Start watcher")
         self._start_button.clicked.connect(self._start_selected)
@@ -296,15 +168,22 @@ class WatchersTab(QWidget):
         control_row.addWidget(self._stop_button)
         control_row.addStretch()
 
+        save_row = QDialogButtonBox(QDialogButtonBox.StandardButton.Save)
+        save_row.accepted.connect(self._save_clicked)
+
         right = QVBoxLayout()
         right.addWidget(self._editor)
         right.addLayout(control_row)
+        right.addWidget(save_row)
         right_widget = QWidget()
         right_widget.setLayout(right)
 
-        splitter_layout = QHBoxLayout(self)
-        splitter_layout.addWidget(left_widget)
-        splitter_layout.addWidget(right_widget, 3)
+        splitter_layout = QVBoxLayout(self)
+        splitter_layout.addWidget(self._hint)
+        body = QHBoxLayout()
+        body.addWidget(left_widget)
+        body.addWidget(right_widget, 3)
+        splitter_layout.addLayout(body)
 
     # ------------------------------------------------------------------
     def set_watchers(self, watchers: list[WatcherConfig]) -> None:
@@ -330,6 +209,7 @@ class WatchersTab(QWidget):
 
     # ------------------------------------------------------------------
     def _on_selection(self, current, previous) -> None:
+        del previous
         if current is None:
             self._editing_name = None
             return
@@ -341,7 +221,7 @@ class WatchersTab(QWidget):
 
     def _new_watcher(self) -> None:
         self._editor.blank()
-        self._editing_name = None  # a save with no prior name creates a new entry
+        self._editing_name = None
 
     def _delete_watcher(self) -> None:
         name = self._current_name()
@@ -352,7 +232,8 @@ class WatchersTab(QWidget):
         self.set_watchers(self._watchers)
         self._on_changed(self._watchers)
 
-    def _save_editor(self, config: WatcherConfig) -> None:
+    def _save_clicked(self) -> None:
+        config = self._editor.build_config()
         if self._editing_name is None:
             self._watchers.append(config)
         else:
@@ -395,3 +276,4 @@ class WatchersTab(QWidget):
         row = next((i for i, w in enumerate(self._watchers) if w.name == name), -1)
         if row >= 0:
             self._list.setCurrentRow(row)
+

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any
+
+from app.conditions import ScreenCondition
 
 DEFAULT_SETTINGS_PATH = Path("data") / "settings.json"
 
@@ -28,7 +30,12 @@ class ActionConfig:
 
 @dataclass(frozen=True)
 class MacroConfig:
-    """A named sequence of actions with playback options."""
+    """A named sequence of actions with playback and screen-condition options.
+
+    ``start_condition`` gates execution: the macro waits until it holds on
+    screen before running its first action.  ``stop_condition`` interrupts a
+    running macro as soon as it holds.  Either may be left unconfigured.
+    """
 
     name: str = "New macro"
     start_hotkey: str = "f6"
@@ -36,23 +43,25 @@ class MacroConfig:
     loops: int = 1  # ignored when repeat is True
     interval_ms: int = 0  # delay between loops
     actions: tuple[ActionConfig, ...] = ()
+    start_condition: ScreenCondition | None = None
+    stop_condition: ScreenCondition | None = None
 
 
 @dataclass(frozen=True)
 class WatcherConfig:
-    """Screen reaction rule: fires when an image appears or a region changes."""
+    """Standalone background trigger kept for advanced use cases.
+
+    Wraps a :class:`~app.conditions.ScreenCondition` that is polled
+    continuously; when it fires, the watcher runs its target macro and/or
+    its own action list.
+    """
 
     name: str = "New watcher"
-    mode: str = "image_found"  # image_found | image_missing | region_changed
-    template_path: str = ""
-    confidence: float = 0.85
-    poll_interval_ms: int = 200
+    condition: ScreenCondition = field(default_factory=ScreenCondition)
     cooldown_ms: int = 1000  # min delay between two triggers
-    change_threshold: float = 5.0  # mean per-pixel difference for region_changed
     auto_start: bool = False
     target_macro: str = ""  # macro started when the watcher fires
     actions: tuple[ActionConfig, ...] = ()  # extra actions run after the macro
-    region: tuple[int, int, int, int] = (0, 0, 1920, 1080)  # left, top, width, height
 
 
 @dataclass(frozen=True)
@@ -70,17 +79,32 @@ def _action_from_dict(raw: dict[str, Any]) -> ActionConfig:
     return ActionConfig(**known)
 
 
+def _condition_from_dict(raw: dict[str, Any] | None) -> ScreenCondition | None:
+    """Rebuild an optional :class:`ScreenCondition` from its JSON form."""
+    if not isinstance(raw, dict):
+        return None
+    known = {k: v for k, v in raw.items() if k in ScreenCondition.__dataclass_fields__}
+    if "region" in known:
+        known["region"] = tuple(known["region"])  # type: ignore[assignment]
+    return ScreenCondition(**known)
+
+
 def _macro_from_dict(raw: dict[str, Any]) -> MacroConfig:
-    known = {k: v for k, v in raw.items() if k in MacroConfig.__dataclass_fields__ and k != "actions"}
-    actions = tuple(_action_from_dict(a) for a in raw.get("actions", []))
-    return MacroConfig(actions=actions, **known)
+    skip = {"actions", "start_condition", "stop_condition"}
+    known = {k: v for k, v in raw.items() if k in MacroConfig.__dataclass_fields__ and k not in skip}
+    return MacroConfig(
+        actions=tuple(_action_from_dict(a) for a in raw.get("actions", [])),
+        start_condition=_condition_from_dict(raw.get("start_condition")),
+        stop_condition=_condition_from_dict(raw.get("stop_condition")),
+        **known,
+    )
 
 
 def _watcher_from_dict(raw: dict[str, Any]) -> WatcherConfig:
-    known = {k: v for k, v in raw.items() if k in WatcherConfig.__dataclass_fields__ and k not in {"actions", "region"}}
-    actions = tuple(_action_from_dict(a) for a in raw.get("actions", []))
-    region = tuple(raw.get("region", WatcherConfig.region))
-    return WatcherConfig(actions=actions, region=region, **known)  # type: ignore[arg-type]
+    skip = {"actions", "condition"}
+    known = {k: v for k, v in raw.items() if k in WatcherConfig.__dataclass_fields__ and k not in skip}
+    condition = _condition_from_dict(raw.get("condition")) or ScreenCondition()
+    return WatcherConfig(condition=condition, actions=tuple(_action_from_dict(a) for a in raw.get("actions", [])), **known)
 
 
 def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> AppSettings:
@@ -110,11 +134,20 @@ def save_settings(settings: AppSettings, path: Path = DEFAULT_SETTINGS_PATH) -> 
 
 
 def _to_plain(obj: Any) -> Any:
-    """Convert frozen dataclasses/tuples into JSON-friendly dicts/lists."""
-    if hasattr(obj, "__dataclass_fields__"):
+    """Convert frozen dataclasses/tuples into JSON-friendly dicts/lists.
+
+    ``asdict`` already recurses through nested dataclasses (e.g. a macro's
+    :class:`ScreenCondition`), turning tuples into lists on the way out; this
+    wrapper only normalizes any remaining tuples.
+    """
+    if is_dataclass(obj) and not isinstance(obj, type):
         return {k: _to_plain(v) for k, v in asdict(obj).items()}
     if isinstance(obj, tuple):
         return [_to_plain(v) for v in obj]
+    if isinstance(obj, list):
+        return [_to_plain(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _to_plain(v) for k, v in obj.items()}
     return obj
 
 
