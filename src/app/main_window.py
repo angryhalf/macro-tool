@@ -155,12 +155,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Empty macro", f"'{macro.name}' has no actions yet.")
         else:
             stop_key = describe_hotkey(self._settings.stop_hotkey)
-            if macro.start_paused:
-                self._set_status(
-                    f"'{macro.name}' started PAUSED — press Unpause (or {stop_key} to stop)"
-                )
-            else:
-                self._set_status(f"Running '{macro.name}' — press {stop_key} to stop")
+            self._set_status(f"Running '{macro.name}' — press {stop_key} to stop")
 
     # ------------------------------------------------------------------
     # Global settings callbacks
@@ -192,13 +187,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _refresh_status(self) -> None:
         busy = "running" if self._macro_engine.is_busy() else "idle"
-        paused = [
+        held = [
             name
             for name in self._macro_engine.running_macros()
-            if self._macro_engine.is_macro_paused(name)
+            if self._macro_engine.is_macro_gated(name)
         ]
-        if paused:
-            self._set_status(f"{busy} · paused: {', '.join(paused)}")
+        if held:
+            self._set_status(f"{busy} · actions held by a rule: {', '.join(held)}")
         else:
             self._set_status(busy)
 

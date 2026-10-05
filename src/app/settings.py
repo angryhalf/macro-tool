@@ -50,21 +50,17 @@ CONDITION_ACTION_KINDS: frozenset[str] = frozenset({"wait_for", "pause", "unpaus
 class MacroConfig:
     """A named sequence of actions with playback options.
 
-    The user turns the macro on and off (run button, hotkey, stop); nothing
-    else starts or stops it.  Pausing is expressed *inside the action list*:
-    ``pause`` and ``unpause`` actions carry a :class:`ScreenCondition` and act
-    like triggers -- the screen is watched automatically while the macro runs,
-    holding back the actions after each step according to its rule.  A
+    The user turns the macro on and off (run button, hotkey, stop); there is
+    no separate "paused" macro state.  Pausing is expressed *inside the
+    action list* only: ``pause`` and ``unpause`` actions carry a
+    :class:`ScreenCondition` and act like triggers that gate the stretch of
+    actions written between them -- the screen is watched automatically while
+    the macro runs, holding back those actions according to the rules.  A
     ``wait_for`` action simply blocks until its condition holds.
-
-    By default a macro begins in the *paused* state -- its actions wait at the
-    first boundary until the user presses Unpause (or an ``unpause`` rule
-    clears).  Set ``start_paused=False`` to let it run immediately.
     """
 
     name: str = "New macro"
     start_hotkey: str = "f6"
-    start_paused: bool = True  # hold actions back until the user unpauses
     repeat: bool = False
     loops: int = 1  # ignored when repeat is True
     interval_ms: int = 0  # delay between loops

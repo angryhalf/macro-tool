@@ -1,26 +1,30 @@
 """Core macro execution engine.
 
 The :class:`MacroEngine` runs action sequences on a worker thread, supports
-looping/repeat, hotkey-triggered starts, per-macro pause/unpause toggling and
-an emergency stop that works from any thread (GUI button or global hotkey).
+looping/repeat, hotkey-triggered starts and an emergency stop that works from
+any thread (GUI button or global hotkey).
 
-The macro itself is switched on/off by the user (run button / hotkey / stop).
-Pausing lives *inside the action list*:
+There is *no* macro-level pause state anywhere in this engine -- a macro is
+only ever *running* or *stopped*, and the UI exposes just Run/Stop.  Pause
+and unpause are ordinary **actions** in the sequence that trigger or untrigger
+other actions:
 
 * **``wait_for``** -- block until its screen condition holds on screen (an
   optional timeout on the condition gives up and finishes the macro).
-* **``pause`` / ``unpause``** -- trigger-style flow steps.  The screen is
-  watched automatically (by the background monitor) for whatever rules the
-  macro defines -- no separate watcher setup is needed:
-  - Reaching a ``pause`` step arms its screen rule.  While the rule holds on
-    screen, every action *after* the pair is held back; when it clears, they
-    run again.  Without a rule the step simply holds until the user unpauses.
-  - Reaching an ``unpause`` step arms its own rule: the actions after it stay
-    held until that rule is met on screen, then run freely until the next
-    ``pause`` arms a new rule.
-* **Manual state** -- macros start *paused* unless configured otherwise (or
-  started with ``start_paused=False``); the user can toggle pause/unpause at
-  any time while a macro runs.
+* **``pause <rule>``** -- *triggers off* every action written after it while
+  the rule holds on screen.  The screen is watched automatically by the
+  background monitor; nothing blocks the sequence itself.
+* **``unpause <rule>``** -- *triggers on* every action written after it as
+  soon as the rule holds on screen.
+* Bare ``pause`` / ``unpause`` markers (no rule) open/close a gated stretch:
+  actions between them run only while the earlier ``pause`` rule is absent,
+  and a bare ``unpause`` simply releases the hold opened by the last
+  ``pause``.
+
+These triggers are per-action flags, not a macro state: the sequence always
+keeps advancing through its steps, and each normal action checks its own
+trigger flag right before firing.  When several ``pause`` rules are armed at
+once, any one of them holding keeps the later actions triggered off.
 """
 
 from __future__ import annotations
@@ -36,118 +40,94 @@ logger = logging.getLogger(__name__)
 
 
 class ExecutionToken:
-    """Cooperative cancellation *and* pause handle shared by one running sequence.
+    """Per-run bookkeeping for one running sequence.
 
-    Cancellation is final (user stop / emergency stop).  Pausing has two
-    layers: a *manual* flag toggled by the user, and a *conditional* gate
-    driven by the screen rules attached to the macro's ``pause``/``unpause``
-    steps -- which the engine's background monitor evaluates automatically
-    while the macro runs.  The sequence holds whenever either layer is
-    engaged; while held, :meth:`sleep` waits until it releases and
-    :meth:`wait_if_paused` blocks at action boundaries.
+    A macro with a token like this is simply *running*; there is no paused
+    flag or any other macro-level state a user could toggle.  The token holds
+    two things:
+
+    * Cooperative **cancellation** (user stop / emergency stop) -- final.
+    * The current **trigger setting** for the actions that follow in the
+      sequence, i.e. what the most recent ``pause``/``unpause`` steps did:
+
+      - ``blocked_rules``: the ``pause`` rules currently armed.  Each entry
+        has a ``mode`` (``"while"`` -- block later actions while the rule
+        holds on screen; ``"until"`` -- keep later actions blocked until the
+        rule holds once, then disarm; ``"hold"`` -- a bare ``pause`` marker,
+        blocked until a bare ``unpause`` removes it).  The engine's
+        background monitor watches the screen for these rules automatically.
+      - ``stretch_open``: True between a bare ``pause`` and its ``unpause``,
+        meaning the stretch's actions are tied to the enclosing ``pause``
+        rule(s) instead of running freely.
+
+    When any armed rule currently blocks, :attr:`triggered` is False: normal
+    actions call :meth:`wait_while_blocked` before firing and the whole
+    sequence halts there -- but the flow steps themselves never halt, so a
+    later ``unpause`` can always re-trigger the actions after it.
     """
 
     def __init__(self) -> None:
         self._cancelled = threading.Event()
-        self._released = threading.Event()  # set => not manually paused
-        self._released.set()
-        self._gate_open = threading.Event()  # set => not gated by a screen rule
-        self._gate_open.set()
-        # Gate mode driven by the last flow step reached in the sequence:
-        #   "free"     -- no rule in effect, actions run normally
-        #   "while"    -- a ``pause`` rule is armed: hold *while* it holds
-        #                 on screen (release when it clears)
-        #   "until"    -- an ``unpause`` rule is armed: stay held *until* it
-        #                 holds on screen (the monitor opens the gate once)
-        #   "user"     -- a rule-less ``pause``: hold until the user unpauses
-        self.gate_mode: str = "free"
-        # The screen rule currently armed for the gate (``while`` mode only).
-        self.pause_rule: ScreenCondition | None = None
+        self._blocked = threading.Event()  # set => later actions are triggered off
+        # Rules armed by the ``pause``/``unpause`` steps reached so far.
+        # Each entry: {"mode": "while"|"until"|"hold", "condition": ...}
+        self.blocked_rules: list[dict] = []
+        # True while inside a bare pause/unpause stretch (see docstring).
+        self.stretch_open = False
 
     # -- cancellation --------------------------------------------------
     def cancel(self) -> None:
         self._cancelled.set()
-        # Never leave a paused sequence hanging after cancellation.
-        self._released.set()
-        self._gate_open.set()
+        # Never leave a blocked sequence hanging after cancellation.
+        self._blocked.set()
 
     @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
 
-    # -- manual (user) pause --------------------------------------------
-    def set_manual_pause(self, paused: bool) -> None:
-        if paused:
-            self._released.clear()
+    # -- trigger state (set by the pause/unpause actions) ---------------
+    def refresh_block(self) -> None:
+        """Recompute whether later actions are triggered off from the rules.
+
+        Called by the execution thread whenever the trigger set changes and
+        periodically by the background monitor as screen rules come and go.
+        """
+        blocking = any(entry.get("_blocking") for entry in self.blocked_rules)
+        if blocking:
+            self._blocked.set()
         else:
-            self._released.set()
+            self._blocked.clear()
 
     @property
-    def manually_paused(self) -> bool:
-        return not self._released.is_set()
-
-    # -- conditional (screen-rule) gate ---------------------------------
-    def set_gate(self, active: bool) -> None:
-        """Engage/release the rule-driven gate.
-
-        Manual unpausing by the user also lifts the gate; the monitor
-        re-engages it the next time an armed ``pause`` rule is met on screen.
-        """
-        if active:
-            self._gate_open.clear()
-        else:
-            self._gate_open.set()
+    def triggered(self) -> bool:
+        """True when the actions following the last trigger step may fire."""
+        return not self._blocked.is_set()
 
     @property
     def gated(self) -> bool:
-        return not self._gate_open.is_set()
+        """Alias used by the UI: actions currently held back by a rule."""
+        return self._blocked.is_set()
 
-    # -- combined --------------------------------------------------------
-    def pause(self) -> None:
-        """Request that the sequence hold before its next action."""
-        self._released.clear()
-
-    def unpause(self) -> None:
-        """Let a paused sequence continue.
-
-        Clears the manual layer *and* any rule-driven gate -- including a
-        ``pause``/``unpause`` step waiting for its screen rule: the user
-        pressing Unpause always resumes the actions.  The monitor re-opens
-        pending ``until`` waits (so they do not fire later) and re-engages the
-        gate the next time an armed ``pause`` rule is met on screen.
-        """
-        self._released.set()
-        if self.gate_mode == "until":
-            # The user skipped the wait: execution continues freely now, so
-            # tell the monitor to release any pending wait for that rule.
-            self.gate_mode = "free"
-            self.pause_rule = None
-        if self.gated:
-            self.set_gate(False)
-
-    @property
-    def paused(self) -> bool:
-        return not self._released.is_set() or not self._gate_open.is_set()
-
-    def wait_if_paused(self) -> None:
-        """Block while held (manually or by the gate); returns when released."""
-        while self.paused and not self._cancelled.is_set():
-            self._cancelled.wait(0.1)
+    def wait_while_blocked(self) -> None:
+        """Block while later actions are triggered off; returns when they
+        are triggered on again (or the sequence is cancelled)."""
+        while self._blocked.is_set() and not self._cancelled.is_set():
+            self._cancelled.wait(0.05)
 
     def wait(self, seconds: float) -> None:
         """Plain interruptible wait used for polling cadence.
 
-        Unlike :meth:`sleep` this ignores the pause layers -- it is used by
-        loops that must keep evaluating screen conditions *while* the
-        sequence is held back.
+        Unlike :meth:`sleep` this ignores the trigger state -- it is used by
+        loops that must keep evaluating screen conditions *while* the later
+        actions are triggered off.
         """
         self._cancelled.wait(seconds)
 
     def sleep(self, seconds: float) -> None:
-        """Interruptible sleep: honours cancellation and pauses."""
+        """Interruptible sleep: honours cancellation and the trigger state."""
         deadline = time.monotonic() + seconds
         while True:
-            self.wait_if_paused()
+            self.wait_while_blocked()
             if self._cancelled.is_set():
                 return
             remaining = deadline - time.monotonic()
@@ -218,24 +198,21 @@ class MacroEngine:
         self,
         macro: MacroConfig,
         initial_delay_s: float = 0.0,
-        start_paused: bool | None = None,
     ) -> ExecutionToken | None:
         """Start a macro in a worker thread. Returns the token or None if invalid.
 
-        *start_paused* overrides the macro's own default; when omitted the
-        macro starts paused unless ``macro.start_paused`` is False.
+        The macro runs immediately; any holding is done by the ``pause`` /
+        ``unpause`` steps inside its action list (see :class:`MacroEngine`).
         """
         if not macro.actions:
             logger.info("Macro '%s' has no actions", macro.name)
             return None
         for action in macro.actions:
-            if action.kind in ("wait_for", "pause") and (
+            if action.kind in ("wait_for", "pause", "unpause") and (
                 action.condition is None or not action.condition.configured
             ):
                 logger.warning("Macro '%s': %s action has no usable condition", macro.name, action.kind)
         token = ExecutionToken()
-        if start_paused if start_paused is not None else macro.start_paused:
-            token.pause()  # manual layer: user must press Unpause to begin
         thread = threading.Thread(
             target=self._run_macro,
             args=(macro, token, initial_delay_s),
@@ -277,7 +254,7 @@ class MacroEngine:
             return bool(self._tokens)
 
     # ------------------------------------------------------------------
-    # Per-macro pause control (user-driven)
+    # Running macros (introspection for the UI)
     # ------------------------------------------------------------------
     def running_macros(self) -> dict[str, ExecutionToken]:
         """Map of macro name -> live token for every running macro."""
@@ -291,30 +268,15 @@ class MacroEngine:
     def is_macro_running(self, name: str) -> bool:
         return name in self.running_macros()
 
-    def is_macro_paused(self, name: str) -> bool:
-        tokens = self.running_macros()
-        token = tokens.get(name)
-        return bool(token and token.paused)
+    def is_macro_gated(self, name: str) -> bool:
+        """True when a running macro's actions are currently triggered off.
 
-    def set_macro_paused(self, name: str, paused: bool) -> None:
-        """Toggle the *manual* pause layer of a running macro."""
+        This is *not* a macro state the user can set -- it merely reports
+        whether the ``pause``/``unpause`` triggers inside the action list are
+        holding its actions back at this moment.
+        """
         token = self.running_macros().get(name)
-        if token is None:
-            return
-        token.set_manual_pause(paused)
-        logger.info("Macro '%s': user %s", name, "paused" if paused else "unpaused")
-        self._notify()
-
-    def toggle_macro_pause(self, name: str) -> None:
-        token = self.running_macros().get(name)
-        if token is not None:
-            if token.manually_paused:
-                # Resume: drop the manual layer (and any rule gate) so the
-                # user's Unpause always takes effect immediately.
-                self.set_macro_paused(name, False)
-                token.unpause()
-            else:
-                self.set_macro_paused(name, True)
+        return bool(token and token.gated)
 
     def _finish(self, token: ExecutionToken, macro_name: str | None = None) -> None:
         with self._lock:
@@ -340,6 +302,12 @@ class MacroEngine:
                 if not self._run_actions(macro.actions, token):
                     break
                 loops += 1
+                # Loop boundary: whatever trigger rules are left armed from
+                # the last pass no longer apply to the next one -- start it
+                # with every action triggered on.
+                token.blocked_rules = []
+                token.stretch_open = False
+                token.refresh_block()
                 if not macro.repeat and loops >= max(1, macro.loops):
                     break
                 if token.cancelled:
@@ -357,21 +325,25 @@ class MacroEngine:
     def _run_actions(self, actions: tuple[ActionConfig, ...], token: ExecutionToken) -> bool:
         """Execute one pass of *actions*; False when the pass ended early.
 
-        ``pause``/``unpause`` steps work like triggers; the screen is watched
-        automatically (by the background monitor) for their rules:
+        ``pause``/``unpause`` are ordinary actions that trigger or untrigger
+        the actions written after them; the background monitor watches the
+        screen for their rules automatically:
 
-        * reaching a **pause** step arms its screen rule and starts watching
-          it (execution is *not* blocked here -- actions keep running).  While
-          the rule holds on screen every action *after* the step stops
-          firing; as soon as it clears they resume.  A pause step without a
-          rule simply holds until the user presses Unpause.
-        * reaching an **unpause** step stops watching the previous rule and
-          arms its own: the actions after it stay held until that rule is met
-          on screen, then run freely until the next ``pause`` arms a new rule.
-          An unpause step without a rule just releases any hold immediately.
+        * A **pause** step with a rule arms it: every later action is
+          triggered off while the rule holds on screen and re-triggered as
+          soon as it clears.  A bare pause step (no rule) opens a stretch --
+          later actions stay triggered off until the matching ``unpause``.
+        * An **unpause** step with a rule keeps later actions triggered off
+          until that rule holds on screen once, then triggers them on (and
+          disarms its own rule).  A bare unpause step closes the current
+          stretch: inside one, it hands the stretch's actions back to the
+          enclosing ``pause`` rule(s); otherwise it simply releases any hold.
 
-        Normal actions call :meth:`ExecutionToken.wait_if_paused` first, so
-        everything downstream of the pair pauses/unpauses with the rules.
+        The flow steps themselves are never blocked -- the sequence always
+        advances through them, so a later ``unpause`` can re-trigger what an
+        earlier ``pause`` held back.  Normal actions call
+        :meth:`ExecutionToken.wait_while_blocked` first, which is where the
+        triggering-off actually takes effect.
         """
         index = 0
         total = len(actions)
@@ -380,74 +352,77 @@ class MacroEngine:
                 return False
             action = actions[index]
             kind = action.kind
+            condition = action.condition
+            has_rule = condition is not None and condition.configured
             if kind == "wait_for":
-                if not self._await_condition(action.condition, token):
+                if not self._await_condition(condition, token):
                     return False
             elif kind == "pause":
-                # Trigger: arm the rule; the background monitor watches the
-                # screen and gates every later action while it holds.
-                usable = action.condition is not None and action.condition.configured
-                if usable:
-                    assert action.condition is not None
-                    token.pause_rule = action.condition
-                    token.gate_mode = "while"
-                    # Reflect the *current* screen state right away.
-                    token.set_gate(self._evaluate_once(action.condition))
+                # Trigger this step's rule(s) off for everything after it.
+                if has_rule:
+                    assert condition is not None
+                    entry = {"mode": "while", "condition": condition, "_runtime": None, "_blocking": False}
+                    token.blocked_rules.append(entry)
                     logger.info(
-                        "Pause armed at step %d/%d: actions after this point hold "
-                        "while '%s' is on screen",
-                        index + 1, total, action.condition.description,
+                        "Pause armed at step %d/%d: actions after this point are "
+                        "triggered off while '%s' is on screen",
+                        index + 1, total, condition.description,
                     )
                 else:
-                    # No rule: hold until the user presses Unpause (the manual
-                    # layer is left alone so a later Pause toggle still reads
-                    # correctly).
-                    token.gate_mode = "user"
-                    token.pause_rule = None
-                    token.set_gate(True)
-                    logger.info("Paused at step %d/%d: waiting for user unpause", index + 1, total)
+                    # Bare marker: hold everything after it until the next
+                    # unpause closes the stretch.
+                    token.blocked_rules.append({"mode": "hold", "condition": None, "_blocking": True})
+                    token.stretch_open = True
+                    logger.info(
+                        "Pause stretch opened at step %d/%d: actions hold until the "
+                        "next unpause step",
+                        index + 1, total,
+                    )
+                self._sync_triggers(token)
             elif kind == "unpause":
-                # Trigger: stop watching the previous rule and gate on this
-                # step's own rule instead.
-                token.pause_rule = None
-                if action.condition is not None and action.condition.configured:
-                    # Hold the following actions until the rule is met; the
-                    # monitor opens the gate (once) when it appears on screen.
-                    assert action.condition is not None
-                    token.pause_rule = action.condition
-                    token.gate_mode = "until"
-                    if self._evaluate_once(action.condition):
-                        # Already on screen -- continue straight away.
-                        token.gate_mode = "free"
-                        token.pause_rule = None
-                        token.set_gate(False)
+                if has_rule:
+                    # Trigger on only after this rule appears once on screen.
+                    assert condition is not None
+                    if self._evaluate_once(condition):
                         logger.info(
-                            "Unpause condition already met at step %d/%d: continuing",
+                            "Unpause condition already met at step %d/%d: actions "
+                            "after this point run freely",
                             index + 1, total,
                         )
                     else:
-                        token.set_gate(True)
+                        token.blocked_rules.append(
+                            {"mode": "until", "condition": condition, "_runtime": None, "_blocking": True}
+                        )
                         logger.info(
                             "Unpause armed at step %d/%d: actions after this point "
-                            "wait until '%s' is on screen",
-                            index + 1, total, action.condition.description,
+                            "stay triggered off until '%s' is on screen",
+                            index + 1, total, condition.description,
                         )
                 else:
-                    # No rule attached: release any hold left by the pause
-                    # step (rule-driven *or* user-waiting) so execution
-                    # continues -- the user pressing Unpause also does this.
-                    if token.gated:
-                        logger.info("Pause released at step %d/%d", index + 1, total)
-                    token.gate_mode = "free"
-                    token.set_gate(False)
-                token.wait_if_paused()  # honour a manual Pause while we wait here
+                    # Close the current stretch (or release a leftover hold).
+                    if token.stretch_open:
+                        token.stretch_open = False
+                        logger.info("Pause stretch closed at step %d/%d", index + 1, total)
+                    else:
+                        token.blocked_rules = [e for e in token.blocked_rules if e["mode"] != "hold"]
+                    # Any wait-for-unpause rule before this point is done:
+                    # from here the following actions run freely again.
+                    token.blocked_rules = [e for e in token.blocked_rules if e["mode"] != "until"]
+                self._sync_triggers(token)
             else:
-                token.wait_if_paused()  # never fire actions while paused
+                token.wait_while_blocked()  # don't fire while triggered off
                 if token.cancelled:
                     return False
                 perform_action(action)
             index += 1
         return True
+
+    @staticmethod
+    def _sync_triggers(token: ExecutionToken) -> None:
+        """Reflect the *current* screen state of the armed rules right away."""
+        for entry in token.blocked_rules:
+            entry["_blocking"] = MacroEngine._rule_blocks_now(entry)
+        token.refresh_block()
 
     @staticmethod
     def _evaluate_once(condition: ScreenCondition) -> bool:
@@ -487,11 +462,13 @@ class MacroEngine:
     # Screen-rule monitor (automatically watches for pause/unpause triggers)
     # ------------------------------------------------------------------
     def start_monitor(self) -> None:
-        """Launch the background thread that polls gating rules (once).
+        """Launch the background thread that polls trigger rules (once).
 
         Whenever a running macro's action list contains ``pause``/``unpause``
         steps, their screen rules are watched here automatically -- no
-        separate watcher configuration is needed.
+        separate watcher configuration is needed.  The monitor samples each
+        armed rule at its own ``poll_interval_ms`` and flips the matching
+        actions between triggered on and off as the rule comes and goes.
         """
         if self._monitor_started:
             return
@@ -499,7 +476,7 @@ class MacroEngine:
         threading.Thread(target=self._monitor_loop, name="macro-condition-monitor", daemon=True).start()
 
     def _monitor_loop(self) -> None:
-        """Flip each macro's conditional gate as its screen rules come and go."""
+        """Watch the screen for every running macro's armed trigger rules."""
         last_notify = 0.0
         while True:
             changed = False
@@ -510,61 +487,70 @@ class MacroEngine:
                     changed = True
             if changed and time.monotonic() - last_notify > 0.4:
                 last_notify = time.monotonic()
-                self._notify()  # keep the UI's pause buttons truthful
+                self._notify()  # keep the UI's "held" annotation truthful
             time.sleep(0.05)
 
     @staticmethod
-    def _monitor_token(token: ExecutionToken) -> bool:
-        """Re-evaluate one token's armed rule; True when the gate flipped.
+    def _rule_blocks_now(entry: dict) -> bool:
+        """Whether one armed trigger rule currently blocks later actions.
 
-        Two trigger modes exist, set by the flow step the sequence last
-        reached:
+        Takes one screenshot per rule (through the rule's own detector where
+        needed) and applies the rule's mode:
 
-        * ``while`` (from a ``pause`` step): whenever the rule holds on screen
-          the gate shuts and later actions stop firing; as soon as it clears
-          they resume.
-        * ``until`` (from an ``unpause`` step): the gate stays shut until the
-          rule is met once; then it opens and the mode returns to ``free`` so
-          actions run until the next ``pause`` arms a new rule.
+        * ``while``  -- blocks while the condition holds on screen.
+        * ``until``  -- blocks until the condition holds once; when it does,
+          the rule disarms itself so later actions run freely.
+        * ``hold``   -- a bare pause marker: always blocks until the sequence
+          reaches the matching unpause step.
         """
-        condition = token.pause_rule
-        mode = token.gate_mode
-        if mode == "free" or mode == "user":
-            # Nothing to watch -- make sure a stale gate isn't left shut by an
-            # earlier evaluation failure (a user hold keeps the gate closed).
-            if mode == "free" and token.gated:
-                token.set_gate(False)
-                return True
-            return False
+        mode = entry.get("mode")
+        if mode == "hold":
+            return True
+        condition = entry.get("condition")
         if condition is None or not condition.configured:
             return False
-        runtime = ConditionRuntime.create(condition)
+        runtime = entry.get("_runtime")
+        if runtime is None:
+            runtime = ConditionRuntime.create(condition)
+            entry["_runtime"] = runtime
         try:
-            holding = runtime.evaluate()
+            holding = bool(runtime.evaluate())
         except Exception:  # pragma: no cover - transient capture failures
             logger.exception("Screen-condition check failed (%s)", condition.description)
-            return False
+            return bool(entry.get("_blocking"))
         if mode == "while":
-            if holding and not token.gated:
-                logger.info("Pausing actions: %s", condition.description)
-                token.set_gate(True)
-                return True
-            if not holding and token.gated:
-                logger.info("Unpausing actions: %s cleared", condition.description)
-                token.set_gate(False)
-                return True
-            return False
-        # mode == "until": open the gate once the rule appears on screen.
+            return holding
+        # mode == "until": met once => trigger on and disarm this rule.
         if holding:
-            logger.info("Unpause condition met, resuming actions: %s", condition.description)
-            token.gate_mode = "free"
-            token.pause_rule = None
-            token.set_gate(False)
-            return True
-        if not token.gated:
-            # The user unpaused manually while we were waiting; the wait has
-            # been released -- run freely from here.
-            token.gate_mode = "free"
-            token.pause_rule = None
+            logger.info("Unpause condition met, triggering actions on: %s", condition.description)
+            entry["disarm"] = True
+            return False
+        return True
+
+    @staticmethod
+    def _monitor_token(token: ExecutionToken) -> bool:
+        """Re-evaluate one macro's armed rules; True when triggers flipped.
+
+        This is the automatic screen watching: every rule a running macro's
+        ``pause``/``unpause`` steps left armed gets sampled here, and the
+        blocked/on state of the actions after them follows the screen.  When
+        an ``until`` rule has been met it is removed from the set entirely.
+        """
+        if not token.blocked_rules:
+            # Nothing to watch -- make sure nothing stale is left blocking.
+            was_blocked = token.gated
+            token.refresh_block()
+            return was_blocked
+        for entry in token.blocked_rules:
+            entry["_blocking"] = MacroEngine._rule_blocks_now(entry)
+        token.blocked_rules = [e for e in token.blocked_rules if not e.get("disarm")]
+        before = token.gated
+        token.refresh_block()
+        now = token.gated
+        if before != now:
+            if now:
+                logger.info("Actions triggered off by screen rule")
+            else:
+                logger.info("Actions triggered on again")
             return True
         return False

@@ -1,10 +1,10 @@
-"""Macros tab: list, create, edit, run and pause/unpause macro sequences.
+"""Macros tab: list, create, edit, run and stop macro sequences.
 
-The user turns a macro on and off (Run / Stop); the pause controls only hold
-its actions back temporarily.  Macros start *paused* unless configured
-otherwise -- press Unpause (or let an ``unpause`` screen rule clear) to let it
-begin acting.  Screen-based pausing is expressed with ``pause``/``unpause``
-*actions* inside the sequence, not with separate condition sections.
+The user turns a macro on and off (Run / Stop) -- that is the only macro
+state there is; there is no pause/unpause button and no start-paused option.
+Pause/unpause are ordinary *actions* inside each macro's action list that
+trigger or untrigger other actions based on screen rules; the engine watches
+the screen for those rules automatically while the macro runs.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from ui.macro_editor import MacroEditorDialog
 
 
 class MacrosTab(QWidget):
-    """Table of all macros with add/edit/remove/run/pause controls."""
+    """Table of all macros with add/edit/remove/run controls."""
 
     def __init__(
         self,
@@ -39,8 +39,8 @@ class MacrosTab(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         """*engine* is the :class:`~core.macro_engine.MacroEngine` (optional so
-        the tab stays usable in tests without one); it provides the live
-        per-macro pause/unpause state shown by the Pause button."""
+        the tab stays usable in tests without one); it only provides live
+        run-state info shown in the table (e.g. actions held by a rule)."""
         super().__init__(parent)
         self._on_changed = on_changed
         self._on_run = on_run
@@ -50,7 +50,7 @@ class MacrosTab(QWidget):
 
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
-            ["Name", "Hotkey", "Loops", "Actions", "Start state"]
+            ["Name", "Hotkey", "Loops", "Actions", "Pause rules"]
         )
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -73,16 +73,8 @@ class MacrosTab(QWidget):
         run_row = QHBoxLayout()
         self._run_button = QPushButton("▶ Run selected macro")
         self._run_button.clicked.connect(self._run_selected)
-        self._pause_button = QPushButton("⏸ Pause")
-        self._pause_button.setToolTip(
-            "Hold the running macro's actions back (Unpause resumes them).\n"
-            "Macros start paused by default — press Unpause to let it begin."
-        )
-        self._pause_button.setEnabled(False)
-        self._pause_button.clicked.connect(self._toggle_pause)
         self._status = QLabel("")
         run_row.addWidget(self._run_button)
-        run_row.addWidget(self._pause_button)
         run_row.addWidget(self._status)
         run_row.addStretch()
 
@@ -91,7 +83,7 @@ class MacrosTab(QWidget):
         layout.addWidget(self._table)
         layout.addLayout(run_row)
 
-        # Poll the engine so the Pause button reflects live run state.
+        # Poll the engine so the table reflects live run state.
         self._state_timer = QTimer(self)
         self._state_timer.setInterval(750)
         self._state_timer.timeout.connect(self._refresh_run_state)
@@ -139,7 +131,6 @@ class MacrosTab(QWidget):
                 loops=copy.loops,
                 interval_ms=copy.interval_ms,
                 actions=copy.actions,
-                start_paused=copy.start_paused,
             )
         )
         self._commit()
@@ -155,23 +146,6 @@ class MacrosTab(QWidget):
         if index is not None:
             self._on_run(self._macros[index])
             self._refresh_run_state()
-
-    def _toggle_pause(self) -> None:
-        index = self._selected_index()
-        if index is None or self._engine is None:
-            return
-        name = self._macros[index].name
-        was_paused = self._engine.is_macro_paused(name)
-        self._engine.toggle_macro_pause(name)
-        # If the conditional gate still holds, the macro remains paused.
-        still_paused = self._engine.is_macro_paused(name)
-        if was_paused and still_paused:
-            self.set_status(f"'{name}' still held by a pause rule on screen")
-        elif was_paused:
-            self.set_status(f"'{name}' unpaused")
-        else:
-            self.set_status(f"'{name}' paused")
-        self._refresh_run_state()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -199,40 +173,32 @@ class MacrosTab(QWidget):
         for row, macro in enumerate(self._macros):
             loops = "∞" if macro.repeat else str(macro.loops)
             flow_count, missing_count = self._flow_summary(macro)
-            start_state = "paused" if macro.start_paused else "running"
-            if flow_count:
-                start_state += f" · {flow_count} pause rule(s)"
+            rules = f"{flow_count} pause rule(s)" if flow_count else "—"
             if missing_count:
-                start_state += f" ({missing_count} missing!)"
+                rules += f" ({missing_count} missing!)"
             values = (
                 macro.name,
                 macro.start_hotkey or "—",
                 loops,
                 str(len(macro.actions)),
-                start_state,
+                rules,
             )
             for column, value in enumerate(values):
                 self._table.setItem(row, column, QTableWidgetItem(value))
         self._refresh_run_state()
 
     def _refresh_run_state(self) -> None:
-        """Enable/disable and relabel the Pause button for the selection."""
-        index = self._selected_index()
-        if index is None or self._engine is None:
-            self._pause_button.setEnabled(False)
-            self._pause_button.setText("⏸ Pause")
+        """Annotate running macros whose actions are currently held back."""
+        if self._engine is None:
             return
-        name = self._macros[index].name
-        running = self._engine.is_macro_running(name)
-        self._pause_button.setEnabled(running)
-        if not running:
-            self._pause_button.setText("⏸ Pause")
-            return
-        gated = False
-        token = self._engine.running_macros().get(name)
-        if token is not None:
-            gated = token.gated
-        paused = self._engine.is_macro_paused(name)
-        self._pause_button.setText("▶ Unpause" if paused else "⏸ Pause")
-        if paused and gated:
-            self._pause_button.setToolTip("A pause rule is on screen; it releases when the rule clears.")
+        gated = {
+            name
+            for name in self._engine.running_macros()
+            if self._engine.is_macro_gated(name)
+        }
+        for row, macro in enumerate(self._macros):
+            item = self._table.item(row, 4)
+            if item is None:
+                continue
+            base = item.text().split(" · ")[0]
+            item.setText(f"{base} · ⏸ held" if macro.name in gated else base)

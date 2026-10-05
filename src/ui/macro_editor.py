@@ -15,8 +15,8 @@
   capture live keyboard/mouse input through pynput.
 * :class:`MacroRecorderDialog` -- record an entire input session (keys,
   clicks, moves, scrolls, timings) into an ordered action list in one go.
-* :class:`MacroEditorDialog` -- edit a macro: metadata (including whether it
-  starts paused), plus its action table.
+* :class:`MacroEditorDialog` -- edit a macro: metadata (name, hotkey,
+  looping), plus its action table.
 """
 
 from __future__ import annotations
@@ -82,15 +82,16 @@ _CONDITION_HINTS: dict[str, str] = {
         "give-up timeout ends the macro if it never happens."
     ),
     "pause": (
-        "Opens a gated stretch: every action written between this step and an "
-        "'Unpause when' step is held back while this screen event is present, "
-        "and resumes as soon as it clears.  Without a rule it simply waits "
-        "for you to press Unpause."
+        "Triggers off every action written after this step while this screen "
+        "event is present on screen, and triggers them back on as soon as it "
+        "clears (the screen is watched automatically).  Without a rule it "
+        "opens a stretch whose actions stay held until the next 'Unpause "
+        "when' step closes it."
     ),
     "unpause": (
-        "Closes the gated stretch opened by the last 'Pause when'.  With a "
-        "rule attached, execution stays held until that screen event appears; "
-        "without one it continues immediately."
+        "Triggers on every action written after this step as soon as this "
+        "screen event appears; until then those actions stay held.  Without "
+        "a rule it simply releases the hold opened by the last 'Pause when'."
     ),
 }
 
@@ -876,9 +877,8 @@ class MacroEditorDialog(QDialog):
 
     Layout top-to-bottom:
 
-    * **General** -- name, start hotkey, whether the macro starts paused or
-      runs immediately, and repeat/loops/interval.  The user turns the macro
-      on and off; nothing else stops it.
+    * **General** -- name, start hotkey, repeat/loops and loop interval.
+      The user turns the macro on and off; there is no separate pause state.
     * **Actions** -- an ordered table of steps with add/edit/remove/reorder
       controls plus a whole-session recorder.  Pause/unpause are *actions*:
       insert a "Pause when" step to open a gated stretch and an "Unpause
@@ -900,8 +900,6 @@ class MacroEditorDialog(QDialog):
         # -- general ---------------------------------------------------
         self._name = QLineEdit(macro.name)
         self._hotkey = HotkeyButton(macro.start_hotkey)
-        self._start_paused = QCheckBox("Start paused (wait for Unpause before acting)")
-        self._start_paused.setChecked(macro.start_paused)
         self._repeat = QCheckBox("Repeat until stopped")
         self._repeat.setChecked(macro.repeat)
         self._loops = QSpinBox(minimum=1, maximum=9999, value=max(1, macro.loops))
@@ -913,7 +911,6 @@ class MacroEditorDialog(QDialog):
         meta_form = QFormLayout()
         meta_form.addRow("Name:", self._name)
         meta_form.addRow("Start hotkey:", self._hotkey)
-        meta_form.addRow("Start state:", self._start_paused)
         meta_form.addRow("Repeat:", self._repeat)
         meta_form.addRow("Loops:", self._loops)
         meta_form.addRow("Loop interval:", self._interval)
@@ -1060,5 +1057,4 @@ class MacroEditorDialog(QDialog):
             loops=self._loops.value(),
             interval_ms=self._interval.value(),
             actions=tuple(self._actions),
-            start_paused=self._start_paused.isChecked(),
         )

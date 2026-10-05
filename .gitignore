@@ -1,15 +1,3 @@
-# Compiled/Binary files
+# Python cache files
 __pycache__/
 *.pyc
-
-# Dependency directories
-venv/
-.venv/
-
-# Editor/IDE files
-.vscode/
-.idea/
-
-# System/Environment files
-.env
-.env.local
