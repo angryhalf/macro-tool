@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import mouse as ms
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.app.settings import ActionConfig, MacroConfig
+from src.services.input import current_mouse_position
 from src.ui.widgets import HotkeyButton
 
 ACTION_KINDS = {
@@ -105,9 +105,9 @@ class ActionEditorDialog(QDialog):
                 row.setVisible(widget in visible)
 
     def _record_position(self) -> None:
-        x, y = ms.position()
-        self._x.setValue(int(x))
-        self._y.setValue(int(y))
+        x, y = current_mouse_position()
+        self._x.setValue(x)
+        self._y.setValue(y)
 
     def action(self) -> ActionConfig:
         kind = self._kind.currentData()

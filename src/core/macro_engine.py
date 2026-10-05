@@ -9,12 +9,9 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
-
-import keyboard as kb
-import mouse as ms
 
 from src.app.settings import ActionConfig, AppSettings, MacroConfig
+from src.services.input import HotkeyManager, perform_action
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +40,7 @@ class MacroEngine:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._tokens: set[ExecutionToken] = set()
-        self._hotkeys: dict[str, str] = {}  # hotkey -> macro name
+        self._hotkeys = HotkeyManager()
         self._settings = AppSettings()
         self.on_state_changed: callable | None = None  # called after start/stop events
 
@@ -63,29 +60,32 @@ class MacroEngine:
 
     def _sync_hotkeys(self, settings: AppSettings) -> None:
         """Re-register all global hotkeys (stop key + one per macro)."""
-        kb.unhook_all()
-        self._hotkeys.clear()
-        kb.add_hotkey(settings.stop_hotkey, self.stop_all, suppress=False)
+        bindings: list[tuple[str, object]] = [(settings.stop_hotkey, self.stop_all)]
 
+        seen: set[str] = {settings.stop_hotkey.strip().lower()}
         for macro in settings.macros:
             key = macro.start_hotkey.strip().lower()
             if not key:
                 continue
-            if key in self._hotkeys:
+            if key in seen:
                 logger.warning("Duplicate hotkey '%s' ignored for macro '%s'", key, macro.name)
                 continue
-            self._hotkeys[key] = macro.name
-            try:
-                kb.add_hotkey(key, self._on_hotkey, args=(macro.name,), suppress=False)
-            except ValueError:
-                logger.warning("Invalid hotkey '%s' for macro '%s'", key, macro.name)
+            seen.add(key)
+            bindings.append((key, self._make_macro_launcher(macro.name)))
 
-    def _on_hotkey(self, macro_name: str) -> None:
-        macro = next((m for m in self._settings.macros if m.name == macro_name), None)
-        if macro is None:
-            return
-        delay_s = self._settings.execution_delay_ms / 1000.0
-        self.start_macro(macro, initial_delay_s=delay_s)
+        self._hotkeys.set_hotkeys(bindings)  # type: ignore[arg-type]
+
+    def _make_macro_launcher(self, macro_name: str):
+        """Return a callback that starts the named macro with the start delay."""
+
+        def launch() -> None:
+            macro = next((m for m in self._settings.macros if m.name == macro_name), None)
+            if macro is None:
+                return
+            delay_s = self._settings.execution_delay_ms / 1000.0
+            self.start_macro(macro, initial_delay_s=delay_s)
+
+        return launch
 
     # ------------------------------------------------------------------
     # Running
@@ -125,6 +125,11 @@ class MacroEngine:
             token.cancel()
         logger.info("Stop requested: %d sequence(s) cancelled", len(tokens))
         self._notify()
+
+    def shutdown(self) -> None:
+        """Stop everything and unregister global hotkeys (on app exit)."""
+        self.stop_all()
+        self._hotkeys.stop()
 
     def is_busy(self) -> bool:
         with self._lock:
@@ -168,30 +173,4 @@ class MacroEngine:
         for action in actions:
             if token.cancelled:
                 return
-            self._perform(action)
-
-    # ------------------------------------------------------------------
-    # Primitive actions
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _perform(action: ActionConfig) -> None:
-        kind = action.kind
-        if kind == "key":
-            kb.press_and_release(action.key)
-        elif kind == "hold_key":
-            kb.press(action.key)
-            time.sleep(max(action.duration_ms, 1) / 1000.0)
-            kb.release(action.key)
-        elif kind == "move":
-            if action.x is not None and action.y is not None:
-                ms.move(action.x, action.y, duration=0.05)
-        elif kind == "click":
-            ms.click(action.button)
-        elif kind == "double_click":
-            ms.double_click(action.button)
-        elif kind == "scroll":
-            ms.scroll(action.amount, direction="up" if action.amount >= 0 else "down")
-        elif kind == "wait":
-            time.sleep(max(action.duration_ms, 0) / 1000.0)
-        else:
-            logger.warning("Unknown action kind: %r", kind)
+            perform_action(action)

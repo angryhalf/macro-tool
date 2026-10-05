@@ -21,8 +21,8 @@ matching) or when a region of the screen changes — and run a macro in response
 
 ## Installation
 
-Requires Python 3.10+ (Windows recommended; `keyboard`/`mouse` need root/admin
-on Linux).
+Requires Python 3.10+ (Windows recommended; pynput needs root on Linux for
+keyboard/mouse control).
 
 ```bash
 python -m venv .venv
@@ -63,8 +63,9 @@ src/
 │   ├── macro_engine.py     # threaded macro playback, global hotkeys, stop-all
 │   └── watcher_engine.py   # polling threads: template match & change detection
 ├── services/
-│   ├── screen_capture.py   # mss/OpenCV capture helpers
-│   └── region_picker.py    # fullscreen drag-select overlay
+│   ├── input.py              # pynput keyboard/mouse synthesis + global hotkeys
+│   ├── screen_capture.py     # mss/OpenCV capture helpers
+│   └── region_picker.py      # fullscreen drag-select overlay
 └── ui/
     ├── macros_tab.py       # macro list + run controls
     ├── macro_editor.py     # macro & action editor dialogs

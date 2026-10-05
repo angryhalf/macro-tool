@@ -27,6 +27,7 @@ from src.app.settings import (
 )
 from src.core.macro_engine import MacroEngine
 from src.core.watcher_engine import ScreenWatcherEngine
+from src.services.input import describe_hotkey
 from src.ui.macros_tab import MacrosTab
 from src.ui.settings_tab import SettingsTab
 from src.ui.watchers_tab import WatchersTab
@@ -73,7 +74,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.settings_tab, "Settings")
 
         # -- top bar ---------------------------------------------------
-        self.stop_button = QPushButton(f"■ STOP ALL ({self._settings.stop_hotkey.upper()})")
+        self.stop_button = QPushButton(f"■ STOP ALL ({describe_hotkey(self._settings.stop_hotkey)})")
         self.stop_button.setStyleSheet(
             "background-color:#c0392b; color:white; font-weight:bold; padding:6px;"
         )
@@ -124,7 +125,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._watcher_engine.stop_all()
-        self._macro_engine.stop_all()
+        self._macro_engine.shutdown()
         self._save()
         super().closeEvent(event)
 
@@ -156,7 +157,8 @@ class MainWindow(QMainWindow):
         if token is None:
             QMessageBox.information(self, "Empty macro", f"'{macro.name}' has no actions yet.")
         else:
-            self._set_status(f"Running '{macro.name}' — press {self._settings.stop_hotkey.upper()} to stop")
+            stop_key = describe_hotkey(self._settings.stop_hotkey)
+            self._set_status(f"Running '{macro.name}' — press {stop_key} to stop")
 
     # ------------------------------------------------------------------
     # Watcher tab callbacks
@@ -188,14 +190,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _on_global_settings_changed(self) -> None:
         self._pull_global_settings()
-        self.stop_hotkey_changed()
-        self.stop_button.setText(f"■ STOP ALL ({self._settings.stop_hotkey.upper()})")
-
-    def stop_hotkey_changed(self) -> None:
-        """Re-register hotkeys after the global stop key changed."""
         self._apply_to_engines()
         self._save()
-        self.stop_button.setText(f"■ STOP ALL ({self._settings.stop_hotkey.upper()})")
+        self.stop_button.setText(f"■ STOP ALL ({describe_hotkey(self._settings.stop_hotkey)})")
 
     def _pull_global_settings(self) -> None:
         """Copy the settings-tab widgets into the settings document."""
