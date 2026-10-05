@@ -57,11 +57,6 @@ from services.input import (
 from ui.condition_editor import ConditionEditor
 from ui.widgets import HotkeyButton
 
-    sort_combo,
-)
-from ui.condition_editor import ConditionEditor
-from ui.widgets import HotkeyButton
-
 #: Human label -> action kind understood by ``services.input.perform_action``
 #: (the last three are flow-control kinds handled by the macro engine).
 ACTION_KINDS: dict[str, str] = {
