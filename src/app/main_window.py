@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QStatusBar,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -90,7 +91,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.addLayout(top_row)
         layout.addWidget(tabs)
-        self.setStatusBar(QLabel(""))
+        self.setStatusBar(QStatusBar())
         layout.setContentsMargins(8, 8, 8, 0)
         self.setCentralWidget(central)
 
@@ -227,4 +228,4 @@ class MainWindow(QMainWindow):
         self.watchers_tab.set_running_state(running)
 
     def _set_status(self, text: str) -> None:
-        self.statusBar().setText(text)
+        self.statusBar().showMessage(text)
