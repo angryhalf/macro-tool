@@ -1,8 +1,0 @@
-{
-  "panic_key": "F8",
-  "image_trigger": {
-    "confidence": 0.7,
-    "click_interval_ms": 100
-  },
-  "timer_keybinds": []
-}
