@@ -14,10 +14,21 @@ DEFAULT_SETTINGS_PATH = Path("data") / "settings.json"
 
 @dataclass(frozen=True)
 class ActionConfig:
-    """A single keyboard/mouse action inside a macro sequence."""
+    """A single step inside a macro sequence.
+
+    Besides keyboard/mouse steps, two flow-control kinds exist:
+
+    * ``wait_for`` -- block until a screen condition (stored in ``condition``)
+      holds on screen.
+    * ``pause`` / ``unpause`` -- mark where automatic condition-based
+      pausing/unpausing happens: every action written between a *pause* and an
+      *unpause* action is held back while that rule holds on screen (the rule
+      lives in the action's ``condition`` field).
+    """
 
     kind: str = "key"  # key | hold_key | combo | type | move | click | double_click
     #                    mouse_down | mouse_up | drag | scroll | wait
+    #                    wait_for | pause | unpause
     key: str = ""  # for key/hold_key actions (e.g. "a", "space", "f1")
     button: str = "left"  # for click/double_click/mouse_down/mouse_up/drag actions
     x: int | None = None  # absolute screen X (mouse actions; drag start)
@@ -26,27 +37,35 @@ class ActionConfig:
     duration_ms: int = 50  # hold time; wait delay; drag end Y
     combo: str = ""  # for combo actions, e.g. "ctrl+shift+d"
     text: str = ""  # for type actions, the literal string to type
+    condition: ScreenCondition | None = None  # for wait_for/pause/unpause actions
+
+
+#: Action kinds that gate execution on a screen condition.
+CONDITION_ACTION_KINDS: frozenset[str] = frozenset({"wait_for", "pause", "unpause"})
 
 
 @dataclass(frozen=True)
 class MacroConfig:
-    """A named sequence of actions with playback and screen-condition options.
+    """A named sequence of actions with playback options.
 
-    The user turns the macro on/off (run button, hotkey, stop).  Conditions
-    only pause/unpause its actions while it runs:  ``pause_condition`` holds
-    the macro's actions back while it is true on screen; once paused,
-    ``unpause_condition`` (if configured) must hold before execution resumes.
-    Either may be left unconfigured.
+    The user turns the macro on and off (run button, hotkey, stop); nothing
+    else starts or stops it.  Pausing is expressed *inside the action list*:
+    ``pause`` and ``unpause`` actions carry a :class:`ScreenCondition`, and
+    while that rule holds on screen every action between the pair is held
+    back.  A ``wait_for`` action simply blocks until its condition holds.
+
+    By default a macro begins in the *paused* state -- its actions wait at the
+    first boundary until the user presses Unpause (or an ``unpause`` rule
+    clears).  Set ``start_paused=False`` to let it run immediately.
     """
 
     name: str = "New macro"
     start_hotkey: str = "f6"
+    start_paused: bool = True  # hold actions back until the user unpauses
     repeat: bool = False
     loops: int = 1  # ignored when repeat is True
     interval_ms: int = 0  # delay between loops
     actions: tuple[ActionConfig, ...] = ()
-    pause_condition: ScreenCondition | None = None
-    unpause_condition: ScreenCondition | None = None
 
 
 @dataclass(frozen=True)
@@ -77,8 +96,9 @@ class AppSettings:
 
 
 def _action_from_dict(raw: dict[str, Any]) -> ActionConfig:
-    known = {k: v for k, v in raw.items() if k in ActionConfig.__dataclass_fields__}
-    return ActionConfig(**known)
+    known = {k: v for k, v in raw.items() if k in ActionConfig.__dataclass_fields__ and k != "condition"}
+    condition = _condition_from_dict(raw.get("condition"))
+    return ActionConfig(condition=condition, **known)
 
 
 def _condition_from_dict(raw: dict[str, Any] | None) -> ScreenCondition | None:
@@ -92,18 +112,38 @@ def _condition_from_dict(raw: dict[str, Any] | None) -> ScreenCondition | None:
 
 
 def _macro_from_dict(raw: dict[str, Any]) -> MacroConfig:
-    skip = {"actions", "pause_condition", "unpause_condition"}
-    known = {k: v for k, v in raw.items() if k in MacroConfig.__dataclass_fields__ and k not in skip}
-    # Older settings files used start/stop condition names; map them onto the
-    # pause/unpause semantics (the macro is turned on/off by the user).
-    pause_raw = raw.get("pause_condition", raw.get("start_condition"))
-    unpause_raw = raw.get("unpause_condition", raw.get("stop_condition"))
-    return MacroConfig(
-        actions=tuple(_action_from_dict(a) for a in raw.get("actions", [])),
-        pause_condition=_condition_from_dict(pause_raw),
-        unpause_condition=_condition_from_dict(unpause_raw),
-        **known,
+    known = {k: v for k, v in raw.items() if k in MacroConfig.__dataclass_fields__ and k != "actions"}
+    actions = [_action_from_dict(a) for a in raw.get("actions", [])]
+    actions = _migrate_legacy_conditions(raw, actions)
+    return MacroConfig(actions=tuple(actions), **known)
+
+
+def _migrate_legacy_conditions(raw: dict[str, Any], actions: list[ActionConfig]) -> list[ActionConfig]:
+    """Fold old top-level pause/unpause conditions into the action list.
+
+    Earlier versions stored ``start_condition``/``stop_condition`` (later
+    renamed ``pause_condition``/``unpause_condition``) directly on the macro.
+    Those semantics are now expressed as *actions*: a ``wait_for`` step at the
+    head of the sequence, and a ``pause``/``unpause`` pair wrapped around it.
+    """
+    legacy_pause = _condition_from_dict(raw.get("pause_condition", raw.get("start_condition")))
+    legacy_unpause = _condition_from_dict(raw.get("unpause_condition", raw.get("stop_condition")))
+    if legacy_pause is None and legacy_unpause is None:
+        return actions
+    if not actions:
+        return actions
+    gate = legacy_unpause or legacy_pause
+    assert gate is not None
+    prefix = [ActionConfig(kind="wait_for", condition=legacy_pause)] if legacy_pause else []
+    suffix = (
+        [
+            ActionConfig(kind="pause", condition=gate),
+            ActionConfig(kind="unpause", condition=gate),
+        ]
+        if legacy_unpause
+        else []
     )
+    return prefix + actions + suffix
 
 
 def _watcher_from_dict(raw: dict[str, Any]) -> WatcherConfig:

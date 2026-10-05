@@ -1,15 +1,22 @@
-"""Macro editor: pause/unpause screen conditions, actions and input recording.
+"""Macro editor: actions, pause/unpause flow steps and input recording.
 
-* :class:`ConditionEditor` (in :mod:`ui.condition_editor`) is embedded twice in
-  the macro dialog -- once as an optional *pause condition* and once as the
-  *unpause condition* that must hold before a paused macro resumes.
-* :class:`ActionEditorDialog` -- edit one keyboard/mouse step; every action
-  type shows only the fields it needs, and *Record* buttons capture live
-  keyboard/mouse input through pynput.
+* :class:`ActionEditorDialog` -- edit one step of a macro's action list.  On
+  top of the keyboard/mouse kinds there are three *flow-control* actions that
+  carry a screen condition (built with :class:`ConditionEditor` from
+  :mod:`ui.condition_editor`):
+
+  - **Wait until** (``wait_for``) blocks until the rule holds on screen.
+  - **Pause when** (``pause``) opens a stretch whose actions are held back
+    while the rule is present on screen.
+  - **Unpause when** (``unpause``) closes that stretch (and can itself wait
+    for its rule before execution continues).
+
+  Every action type shows only the fields it needs, and *Record* buttons
+  capture live keyboard/mouse input through pynput.
 * :class:`MacroRecorderDialog` -- record an entire input session (keys,
   clicks, moves, scrolls, timings) into an ordered action list in one go.
-* :class:`MacroEditorDialog` -- edit a macro: metadata, conditions, plus its
-  action table.
+* :class:`MacroEditorDialog` -- edit a macro: metadata (including whether it
+  starts paused), plus its action table.
 """
 
 from __future__ import annotations
@@ -39,12 +46,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.conditions import ScreenCondition
 from app.settings import ActionConfig, MacroConfig
 from services.input import InputRecorder, current_mouse_position
 from ui.condition_editor import ConditionEditor
 from ui.widgets import HotkeyButton
 
-#: Human label -> action kind understood by ``services.input.perform_action``.
+#: Human label -> action kind understood by ``services.input.perform_action``
+#: (the last three are flow-control kinds handled by the macro engine).
 ACTION_KINDS: dict[str, str] = {
     "Press key": "key",
     "Hold key": "hold_key",
@@ -58,11 +67,32 @@ ACTION_KINDS: dict[str, str] = {
     "Drag": "drag",
     "Scroll": "scroll",
     "Wait": "wait",
+    "Wait until (screen)": "wait_for",
+    "Pause when (screen)": "pause",
+    "Unpause when (screen)": "unpause",
 }
 
 BUTTONS = ["left", "right", "middle"]
 
 _KEY_FIELD_HINT = "One press of the key when the macro runs (e.g. a, space, f5, enter)."
+
+_CONDITION_HINTS: dict[str, str] = {
+    "wait_for": (
+        "Execution stops here until this screen event appears; the optional "
+        "give-up timeout ends the macro if it never happens."
+    ),
+    "pause": (
+        "Opens a gated stretch: every action written between this step and an "
+        "'Unpause when' step is held back while this screen event is present, "
+        "and resumes as soon as it clears.  Without a rule it simply waits "
+        "for you to press Unpause."
+    ),
+    "unpause": (
+        "Closes the gated stretch opened by the last 'Pause when'.  With a "
+        "rule attached, execution stays held until that screen event appears; "
+        "without one it continues immediately."
+    ),
+}
 
 
 class _FieldRow(QHBoxLayout):
@@ -99,6 +129,7 @@ class ActionEditorDialog(QDialog):
 
         self._pages = QStackedWidget()
         self._page_for_kind: dict[str, QWidget] = {}
+        self._condition_editors: dict[str, ConditionEditor] = {}
         self._add_page("key", self._build_key_page(action))
         self._add_page("hold_key", self._build_hold_page(action))
         self._add_page("combo", self._build_combo_page(action))
@@ -111,6 +142,9 @@ class ActionEditorDialog(QDialog):
         self._add_page("drag", self._build_drag_page(action))
         self._add_page("scroll", self._build_scroll_page(action))
         self._add_page("wait", self._build_wait_page(action))
+        self._add_page("wait_for", self._build_condition_page("wait_for", action))
+        self._add_page("pause", self._build_condition_page("pause", action))
+        self._add_page("unpause", self._build_condition_page("unpause", action))
 
         self._kind.currentIndexChanged.connect(self._show_page)
 
@@ -279,6 +313,21 @@ class ActionEditorDialog(QDialog):
         self._wait_duration.setSuffix(" ms")
         form = QFormLayout(page)
         form.addRow("Wait:", self._wait_duration)
+        return page
+
+    def _build_condition_page(self, kind: str, action: ActionConfig) -> QWidget:
+        """Page for the flow-control actions (``wait_for``/``pause``/``unpause``).
+
+        Embeds a :class:`ConditionEditor` so the screen rule lives *on the
+        action itself*; ``wait_for`` additionally exposes its give-up timeout.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self._hint(_CONDITION_HINTS[kind]))
+        editor = ConditionEditor(show_timeout=kind == "wait_for")
+        editor.load(action.condition if action.condition is not None else ScreenCondition(template_path=""))
+        self._condition_editors[kind] = editor
+        layout.addWidget(editor)
         return page
 
     @staticmethod
@@ -524,6 +573,12 @@ class ActionEditorDialog(QDialog):
             return ActionConfig(kind=kind, amount=self._scroll_amount.value())
         if kind == "wait":
             return ActionConfig(kind=kind, duration_ms=self._wait_duration.value())
+        if kind in ("wait_for", "pause", "unpause"):
+            editor = self._condition_editors.get(kind)
+            condition = editor.build() if editor is not None else None
+            if condition is not None and not condition.configured:
+                condition = None
+            return ActionConfig(kind=kind, condition=condition)
         return ActionConfig(kind=kind)
 
 
@@ -795,17 +850,14 @@ class MacroEditorDialog(QDialog):
 
     Layout top-to-bottom:
 
-    * **General** -- name, start hotkey, repeat/loops/interval.  The user
-      turns the macro on and off; conditions never stop it.
-    * **Pause condition** (optional) -- a :class:`ScreenCondition`; while it
-      holds on screen the macro's actions are paused and they resume as soon
-      as it clears.  A timeout can be configured so the initial wait
-      eventually gives up.
-    * **Unpause condition** (optional) -- once the macro has been paused, this
-      rule must hold on screen before execution resumes (ignored without a
-      pause condition).
-    * **Actions** -- an ordered table of keyboard/mouse steps with add/edit/
-      remove/reorder controls plus a whole-session recorder.
+    * **General** -- name, start hotkey, whether the macro starts paused or
+      runs immediately, and repeat/loops/interval.  The user turns the macro
+      on and off; nothing else stops it.
+    * **Actions** -- an ordered table of steps with add/edit/remove/reorder
+      controls plus a whole-session recorder.  Pause/unpause are *actions*:
+      insert a "Pause when" step to open a gated stretch and an "Unpause
+      when" step to close it -- everything written between them is held back
+      while the pause step's screen rule is present on screen.
     """
 
     def __init__(
@@ -822,6 +874,8 @@ class MacroEditorDialog(QDialog):
         # -- general ---------------------------------------------------
         self._name = QLineEdit(macro.name)
         self._hotkey = HotkeyButton(macro.start_hotkey)
+        self._start_paused = QCheckBox("Start paused (wait for Unpause before acting)")
+        self._start_paused.setChecked(macro.start_paused)
         self._repeat = QCheckBox("Repeat until stopped")
         self._repeat.setChecked(macro.repeat)
         self._loops = QSpinBox(minimum=1, maximum=9999, value=max(1, macro.loops))
@@ -833,42 +887,12 @@ class MacroEditorDialog(QDialog):
         meta_form = QFormLayout()
         meta_form.addRow("Name:", self._name)
         meta_form.addRow("Start hotkey:", self._hotkey)
+        meta_form.addRow("Start state:", self._start_paused)
         meta_form.addRow("Repeat:", self._repeat)
         meta_form.addRow("Loops:", self._loops)
         meta_form.addRow("Loop interval:", self._interval)
         meta_box = QGroupBox("General")
         meta_box.setLayout(meta_form)
-
-        # -- pause / unpause conditions ----------------------------------
-        self._pause_enabled = QCheckBox("Pause actions while this screen event is present")
-        self._pause_editor = ConditionEditor(show_timeout=True)
-        self._pause_enabled.toggled.connect(self._pause_editor.setVisible)
-        if macro.pause_condition is not None:
-            self._pause_enabled.setChecked(True)
-            self._pause_editor.load(macro.pause_condition)
-        else:
-            self._pause_editor.load(None)
-            self._pause_editor.clear()
-            self._pause_editor.setVisible(False)
-        pause_box = QGroupBox("Pause condition")
-        pause_layout = QVBoxLayout(pause_box)
-        pause_layout.addWidget(self._pause_enabled)
-        pause_layout.addWidget(self._pause_editor)
-
-        self._unpause_enabled = QCheckBox("Only resume once this screen event appears")
-        self._unpause_editor = ConditionEditor(show_timeout=False)
-        self._unpause_enabled.toggled.connect(self._unpause_editor.setVisible)
-        if macro.unpause_condition is not None:
-            self._unpause_enabled.setChecked(True)
-            self._unpause_editor.load(macro.unpause_condition)
-        else:
-            self._unpause_editor.load(None)
-            self._unpause_editor.clear()
-            self._unpause_editor.setVisible(False)
-        unpause_box = QGroupBox("Unpause condition")
-        unpause_layout = QVBoxLayout(unpause_box)
-        unpause_layout.addWidget(self._unpause_enabled)
-        unpause_layout.addWidget(self._unpause_editor)
 
         # -- actions ---------------------------------------------------
         self._table = QTableWidget(0, 2)
