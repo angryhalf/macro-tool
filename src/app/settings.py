@@ -14,13 +14,16 @@ DEFAULT_SETTINGS_PATH = Path("data") / "settings.json"
 class ActionConfig:
     """A single keyboard/mouse action inside a macro sequence."""
 
-    kind: str = "key"  # key | hold_key | move | click | double_click | scroll | wait
+    kind: str = "key"  # key | hold_key | combo | type | move | click | double_click
+    #                    mouse_down | mouse_up | drag | scroll | wait
     key: str = ""  # for key/hold_key actions (e.g. "a", "space", "f1")
-    button: str = "left"  # for click/double_click actions
-    x: int | None = None  # absolute screen X for mouse actions
-    y: int | None = None  # absolute screen Y for mouse actions
-    amount: int = 0  # scroll amount (positive up, negative down)
-    duration_ms: int = 50  # hold time for hold_key; delay for wait
+    button: str = "left"  # for click/double_click/mouse_down/mouse_up/drag actions
+    x: int | None = None  # absolute screen X (mouse actions; drag start)
+    y: int | None = None  # absolute screen Y (mouse actions; drag start)
+    amount: int = 0  # scroll steps; type delay ms; drag end X
+    duration_ms: int = 50  # hold time; wait delay; drag end Y
+    combo: str = ""  # for combo actions, e.g. "ctrl+shift+d"
+    text: str = ""  # for type actions, the literal string to type
 
 
 @dataclass(frozen=True)

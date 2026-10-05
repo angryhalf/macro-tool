@@ -26,11 +26,13 @@ class MacrosTab(QWidget):
         self,
         on_changed: Callable[[list[MacroConfig]], None],
         on_run: Callable[[MacroConfig], None],
+        stop_hotkey_provider: Callable[[], str] = lambda: "f8",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_changed = on_changed
         self._on_run = on_run
+        self._stop_hotkey_provider = stop_hotkey_provider
         self._macros: list[MacroConfig] = []
 
         self._table = QTableWidget(0, 4)
@@ -80,7 +82,7 @@ class MacrosTab(QWidget):
     # Slots
     # ------------------------------------------------------------------
     def _add_macro(self) -> None:
-        dialog = MacroEditorDialog(MacroConfig(), parent=self)
+        dialog = MacroEditorDialog(MacroConfig(), parent=self, stop_hotkey=self._stop_hotkey_provider())
         if dialog.exec():
             self._macros.append(dialog.macro())
             self._commit()
@@ -90,7 +92,7 @@ class MacrosTab(QWidget):
         if index is None:
             return
         original = self._macros[index]
-        dialog = MacroEditorDialog(original, parent=self)
+        dialog = MacroEditorDialog(original, parent=self, stop_hotkey=self._stop_hotkey_provider())
         if dialog.exec():
             self._macros[index] = dialog.macro()
             self._commit()

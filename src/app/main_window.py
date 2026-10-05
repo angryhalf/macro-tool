@@ -63,7 +63,9 @@ class MainWindow(QMainWindow):
         self.watcher_fired.connect(lambda name: self._set_status(f"Watcher '{name}' fired"))
 
         # -- tabs ------------------------------------------------------
-        self.macros_tab = MacrosTab(self._on_macros_changed, self._run_macro)
+        self.macros_tab = MacrosTab(
+            self._on_macros_changed, self._run_macro, lambda: self._settings.stop_hotkey
+        )
         self.watchers_tab = WatchersTab(
             self._on_watchers_changed, self._start_watcher, self._stop_watcher, self._macro_names
         )

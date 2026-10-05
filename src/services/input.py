@@ -43,6 +43,13 @@ _BUTTONS: dict[str, ms.Button] = {
     "middle": ms.Button.middle,
 }
 
+_BUTTON_NAMES: dict[ms.Button, str] = {button: name for name, button in _BUTTONS.items()}
+
+#: Names treated as modifiers when ordering hotkey combos (ctrl+alt+shift+key).
+MODIFIER_NAMES: frozenset[str] = frozenset(
+    {"ctrl", "ctrl_l", "ctrl_r", "alt", "alt_l", "alt_r", "shift", "shift_l", "shift_r", "cmd", "cmd_r"}
+)
+
 
 def _to_kb_key(name: str) -> kb.Key | str | None:
     """Resolve an action key name ("a", "space", "f5") into a pynput key."""
@@ -61,8 +68,23 @@ def _to_kb_key(name: str) -> kb.Key | str | None:
         return None
 
 
+def to_pynput_key(key: kb.Key | kb.KeyCode) -> str:
+    """Inverse of :func:`_to_kb_key`: a pynput key event -> canonical name."""
+    if isinstance(key, kb.KeyCode):
+        return key.char or f"<{hex(key.vk)}>"
+    return key.name
+
+
 def _to_ms_button(name: str) -> ms.Button:
     return _BUTTONS.get(name, ms.Button.left)
+
+
+def sort_combo(combo: str) -> str:
+    """Normalize a ``"a+ctrl"`` string into modifier-first order ``"ctrl+a"``."""
+    parts = [p.strip().lower() for p in combo.split("+") if p.strip()]
+    modifiers = sorted(p for p in parts if p in MODIFIER_NAMES)
+    others = [p for p in parts if p not in MODIFIER_NAMES]
+    return "+".join(modifiers + others)
 
 
 def current_mouse_position() -> tuple[int, int]:
@@ -76,11 +98,21 @@ def perform_action(action: ActionConfig) -> None:
     kind = action.kind
     if kind in ("key", "hold_key"):
         _perform_key(kind, action.key, action.duration_ms)
+    elif kind == "combo":
+        _perform_combo(action.combo)
+    elif kind == "type":
+        _perform_type(action.text, max(action.amount, 0))
     elif kind == "move":
         if action.x is not None and action.y is not None:
             ms.Controller().position = (action.x, action.y)
     elif kind in ("click", "double_click"):
-        _perform_click(action.button, double=kind == "double_click")
+        _perform_click(action.button, double=kind == "double_click", x=action.x, y=action.y)
+    elif kind == "mouse_down":
+        ms.Controller().press(_to_ms_button(action.button))
+    elif kind == "mouse_up":
+        ms.Controller().release(_to_ms_button(action.button))
+    elif kind == "drag":
+        _perform_drag(action)
     elif kind == "scroll":
         if action.amount:
             ms.Controller().scroll(0, action.amount)
@@ -102,14 +134,68 @@ def _perform_key(kind: str, name: str, duration_ms: int) -> None:
     ctrl.release(key)
 
 
-def _perform_click(button_name: str, *, double: bool) -> None:
+def _perform_combo(combo: str) -> None:
+    """Press all keys of ``"ctrl+shift+d"``, release them in reverse order."""
+    names = [part.strip().lower() for part in combo.split("+") if part.strip()]
+    keys = [_to_kb_key(name) for name in names]
+    if not keys or any(key is None for key in keys):
+        logger.warning("Invalid combo: %r", combo)
+        return
+    ctrl = kb.Controller()
+    pressed = [key for key in keys if key is not None]
+    for key in pressed:
+        ctrl.press(key)
+    for key in reversed(pressed):
+        ctrl.release(key)
+
+
+def _perform_type(text: str, delay_ms: int) -> None:
+    """Type *text* one character at a time using a shared controller."""
+    if not text:
+        return
+    ctrl = kb.Controller()
+    for char in text:
+        try:
+            ctrl.type(char)
+        except Exception:
+            logger.warning("Cannot type character %r", char)
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000.0)
+
+
+def _perform_click(button_name: str, *, double: bool, x: int | None, y: int | None) -> None:
     button = _to_ms_button(button_name)
     ctrl = ms.Controller()
+    if x is not None and y is not None:
+        ctrl.position = (x, y)
     clicks = 2 if double else 1
     for _ in range(clicks):
         ctrl.click(button)
         if double:
             time.sleep(0.03)
+
+
+def _perform_drag(action: ActionConfig) -> None:
+    """Press at (x, y), move to (amount, duration_ms fields), release."""
+    if None in (action.x, action.y):
+        logger.warning("Drag action missing start position")
+        return
+    button = _to_ms_button(action.button)
+    ctrl = ms.Controller()
+    steps = 15
+    start_x, start_y = action.x, action.y
+    end_x = action.amount if action.amount else start_x
+    end_y = action.duration_ms if action.duration_ms else start_y
+    ctrl.position = (start_x, start_y)
+    ctrl.press(button)
+    for step in range(1, steps + 1):
+        frac = step / steps
+        ctrl.position = (
+            int(start_x + (end_x - start_x) * frac),
+            int(start_y + (end_y - start_y) * frac),
+        )
+        time.sleep(0.01)
+    ctrl.release(button)
 
 
 class HotkeyManager:
@@ -215,9 +301,145 @@ def describe_hotkey(combo: str) -> str:
     return "+".join(aliases.get(p, p.upper()) for p in parts)
 
 
+class InputRecorder:
+    """Record live keyboard and mouse input through pynput listeners.
+
+    Callbacks all receive simple, canonical values so callers never touch
+    pynput types:
+
+    * ``on_press(name)`` / ``on_release(name)`` -- key names like ``"a"``,
+      ``"f8"``, ``"space"`` (modifiers included, e.g. ``"ctrl_l"``).
+    * ``on_move(x, y)`` -- pointer position; move events are throttled to
+      one per :attr:`MOVE_THROTTLE_S` seconds.
+    * ``on_scroll(amount)`` -- positive scrolls up.
+    * ``on_button_press(name)`` / ``on_button_release(name)`` -- button is
+      ``"left" | "right" | "middle"``.
+
+    Usage::
+
+        recorder = InputRecorder(on_press=print)
+        recorder.start()
+        ...
+        recorder.stop()   # idempotent, safe from any thread/callback
+    """
+
+    #: Minimum interval between two ``on_move`` callbacks (seconds).
+    MOVE_THROTTLE_S = 0.05
+
+    def __init__(
+        self,
+        on_press: Callable[[str], None] | None = None,
+        on_release: Callable[[str], None] | None = None,
+        on_move: Callable[[int, int], None] | None = None,
+        on_scroll: Callable[[int], None] | None = None,
+        on_button_press: Callable[[str], None] | None = None,
+        on_button_release: Callable[[str], None] | None = None,
+    ) -> None:
+        self._callbacks = {
+            "press": on_press,
+            "release": on_release,
+            "move": on_move,
+            "scroll": on_scroll,
+            "button_press": on_button_press,
+            "button_release": on_button_release,
+        }
+        self._listeners: list[kb.Listener | ms.Listener] = []
+        self._lock = threading.Lock()
+        self._last_move = 0.0
+        self._stopping = False
+
+    @property
+    def running(self) -> bool:
+        with self._lock:
+            return bool(self._listeners)
+
+    def start(self) -> "InputRecorder":
+        """Start both listeners (no-op if already running)."""
+        with self._lock:
+            if self._listeners:
+                return self
+            keyboard = kb.Listener(
+                on_press=lambda key: self._on_key(key, pressed=True),
+                on_release=lambda key: self._on_key(key, pressed=False),
+            )
+            mouse = ms.Listener(
+                on_move=self._on_move,
+                on_click=self._on_click,
+                on_scroll=self._on_scroll,
+            )
+            for listener in (keyboard, mouse):
+                listener.daemon = True
+                listener.start()
+            self._listeners = [keyboard, mouse]
+            self._stopping = False
+        logger.info("Input recorder started")
+        return self
+
+    def stop(self) -> None:
+        """Stop both listeners; safe to call multiple times or from a callback."""
+        with self._lock:
+            listeners, self._listeners = self._listeners, []
+            self._stopping = True
+        for listener in listeners:
+            try:
+                listener.stop()
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Listener already stopped", exc_info=True)
+        if listeners:
+            logger.info("Input recorder stopped")
+
+    def __enter__(self) -> "InputRecorder":
+        return self.start()
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.stop()
+
+    # ------------------------------------------------------------------
+    # pynput event adapters (each drops events already queued during stop)
+    # ------------------------------------------------------------------
+    def _stopped(self) -> bool:
+        with self._lock:
+            return self._stopping
+
+    def _emit(self, name: str, *args: object) -> None:
+        callback = self._callbacks.get(name)
+        if callback is not None:
+            callback(*args)  # type: ignore[arg-type]
+
+    def _on_key(self, key: kb.Key | kb.KeyCode, *, pressed: bool) -> None:
+        if self._stopped():
+            return
+        self._emit("press" if pressed else "release", to_pynput_key(key))
+
+    def _on_move(self, x: float, y: float) -> None:
+        if self._stopped():
+            return
+        now = time.monotonic()
+        if now - self._last_move < self.MOVE_THROTTLE_S:
+            return
+        self._last_move = now
+        self._emit("move", int(x), int(y))
+
+    def _on_click(self, x: float, y: float, button: ms.Button, pressed: bool) -> None:
+        if self._stopped():
+            return
+        del x, y  # positions come from current_mouse_position() when needed
+        name = _BUTTON_NAMES.get(button, "left")
+        self._emit("button_press" if pressed else "button_release", name)
+
+    def _on_scroll(self, x: float, y: float, dx: float, dy: float) -> None:
+        if self._stopped():
+            return
+        del x, y
+        self._emit("scroll", int(dy))
+
+
 __all__ = [
     "HotkeyManager",
+    "InputRecorder",
     "current_mouse_position",
     "describe_hotkey",
     "perform_action",
+    "sort_combo",
+    "to_pynput_key",
 ]
