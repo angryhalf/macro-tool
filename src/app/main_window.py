@@ -1,4 +1,9 @@
-"""The single application window: tabs for macros, watchers and settings."""
+"""The single application window: tabs for macros and settings.
+
+Stop-trigger/start-trigger screen conditions are set *inside* each macro's action list;
+the macro engine's background monitor watches the screen for them
+automatically while a macro runs -- no separate watcher tab is needed.
+"""
 
 from __future__ import annotations
 
@@ -22,17 +27,14 @@ from PySide6.QtWidgets import (
 from app.settings import (
     AppSettings,
     MacroConfig,
-    WatcherConfig,
     load_settings,
     rename_in_settings,
     save_settings,
 )
 from core.macro_engine import MacroEngine
-from core.watcher_engine import ScreenWatcherEngine
 from services.input import describe_hotkey
 from ui.macros_tab import MacrosTab
 from ui.settings_tab import SettingsTab
-from ui.watchers_tab import WatchersTab
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,6 @@ class MainWindow(QMainWindow):
 
     # Engine threads may only touch the GUI through these signals.
     engine_state_changed = Signal()
-    watcher_fired = Signal(str)
 
     def __init__(self, settings_path: str | Path | None = None) -> None:
         super().__init__()
@@ -57,24 +58,21 @@ class MainWindow(QMainWindow):
         # -- engines ---------------------------------------------------
         self._macro_engine = MacroEngine()
         self._macro_engine.on_state_changed = self.engine_state_changed.emit
-        self._watcher_engine = ScreenWatcherEngine(self._macro_engine, self._macros_by_name)
-        self._watcher_engine.on_state_changed = lambda: self.engine_state_changed.emit()
 
         self.engine_state_changed.connect(self._refresh_status)
-        self.watcher_fired.connect(lambda name: self._set_status(f"Watcher '{name}' fired"))
 
         # -- tabs ------------------------------------------------------
         self.macros_tab = MacrosTab(
-            self._on_macros_changed, self._run_macro, lambda: self._settings.stop_hotkey
-        )
-        self.watchers_tab = WatchersTab(
-            self._on_watchers_changed, self._start_watcher, self._stop_watcher, self._macro_names
+            self._on_macros_changed,
+            self._run_macro,
+            self._stop_macro,
+            lambda: self._settings.stop_hotkey,
+            engine=self._macro_engine,
         )
         self.settings_tab = SettingsTab(self._on_global_settings_changed)
 
         tabs = QTabWidget()
         tabs.addTab(self.macros_tab, "Macros")
-        tabs.addTab(self.watchers_tab, "Advanced watchers")
         tabs.addTab(self.settings_tab, "Settings")
 
         # -- top bar ---------------------------------------------------
@@ -99,8 +97,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         # -- initial state ---------------------------------------------
+        # The monitor thread automatically watches the screen for any
+        # stop-trigger/start-trigger conditions defined inside running macros.
+        self._macro_engine.start_monitor()
         self._push_settings_to_ui()
-        self._apply_to_engines(start_auto_watchers=True)
+        self._apply_to_engines()
         self._refresh_status()
 
     # ------------------------------------------------------------------
@@ -108,7 +109,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _push_settings_to_ui(self) -> None:
         self.macros_tab.set_macros(list(self._settings.macros))
-        self.watchers_tab.set_watchers(list(self._settings.watchers))
         self.settings_tab.load(self._settings)
 
     def _update_settings(self, **changes) -> None:
@@ -128,7 +128,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Save failed", "Settings could not be written to disk.")
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self._watcher_engine.stop_all()
         self._macro_engine.shutdown()
         self._save()
         super().closeEvent(event)
@@ -136,9 +135,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Macro tab callbacks
     # ------------------------------------------------------------------
-    def _macro_names(self) -> list[str]:
-        return [m.name for m in self._settings.macros]
-
     def _macros_by_name(self) -> dict[str, MacroConfig]:
         return {m.name: m for m in self._settings.macros}
 
@@ -146,13 +142,11 @@ class MainWindow(QMainWindow):
         old_names = {m.name for m in self._settings.macros}
         new_names = {m.name for m in macros}
         self._settings = replace(self._settings, macros=tuple(macros))
-        # If a macro was renamed, keep watcher references in sync.
+        # If a macro was renamed, keep references in sync.
         removed = old_names - new_names
         added = new_names - old_names
         if len(removed) == 1 and len(added) == 1:
             self._settings = rename_in_settings(self._settings, removed.pop(), added.pop())
-            self.watchers_tab.set_watchers(list(self._settings.watchers))
-        self.watchers_tab.refresh_macro_choices()
         self._apply_to_engines()
         self._save()
 
@@ -162,31 +156,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Empty macro", f"'{macro.name}' has no actions yet.")
         else:
             stop_key = describe_hotkey(self._settings.stop_hotkey)
-            self._set_status(f"Running '{macro.name}' — press {stop_key} to stop")
+            self._set_status(f"Running '{macro.name}' — press {stop_key} to stop all")
 
-    # ------------------------------------------------------------------
-    # Watcher tab callbacks
-    # ------------------------------------------------------------------
-    def _on_watchers_changed(self, watchers: list[WatcherConfig]) -> None:
-        self._update_settings(watchers=tuple(watchers))
-        # Watchers whose config changed should restart if currently running.
-        running = {w.name for w in watchers if self._watcher_engine.is_running(w.name)}
-        for watcher in watchers:
-            if watcher.name in running:
-                self._watcher_engine.start(watcher)
-        self._refresh_status()
-
-    def _start_watcher(self, watcher: WatcherConfig) -> None:
-        if self._watcher_engine.start(watcher):
-            self._set_status(f"Watcher '{watcher.name}' started")
+    def _stop_macro(self, macro: MacroConfig) -> None:
+        """Cancel just the selected macro's running sequence (if any)."""
+        if self._macro_engine.stop_macro(macro.name):
+            self._set_status(f"Stopped '{macro.name}'")
         else:
-            QMessageBox.warning(
-                self, "Cannot start watcher", "Select a valid template image before starting."
-            )
-        self._refresh_status()
-
-    def _stop_watcher(self, name: str) -> None:
-        self._watcher_engine.stop(name)
+            self._set_status(f"'{macro.name}' is not running")
         self._refresh_status()
 
     # ------------------------------------------------------------------
@@ -205,17 +182,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Engines
     # ------------------------------------------------------------------
-    def _apply_to_engines(self, start_auto_watchers: bool = False) -> None:
+    def _apply_to_engines(self) -> None:
         self._pull_global_settings()
         self._macro_engine.apply_settings(self._settings)
-        if start_auto_watchers:
-            for watcher in self._settings.watchers:
-                if watcher.auto_start:
-                    self._watcher_engine.start(watcher)
 
     def _stop_all(self) -> None:
         self._macro_engine.stop_all()
-        self._watcher_engine.stop_all()
         self._set_status("All stopped")
         self._refresh_status()
 
@@ -223,12 +195,11 @@ class MainWindow(QMainWindow):
     # Status
     # ------------------------------------------------------------------
     def _refresh_status(self) -> None:
-        busy = "running" if self._macro_engine.is_busy() else "idle"
-        self._set_status(f"{busy} · {self._watcher_engine.status_text()}")
-        running = {
-            w.name for w in self._settings.watchers if self._watcher_engine.is_running(w.name)
-        }
-        self.watchers_tab.set_running_state(running)
+        running = sorted(self._macro_engine.running_macros())
+        if running:
+            self._set_status("running: " + ", ".join(running))
+        else:
+            self._set_status("idle")
 
     def _set_status(self, text: str) -> None:
         self.statusBar().showMessage(text)

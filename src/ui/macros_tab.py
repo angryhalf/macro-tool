@@ -1,9 +1,17 @@
-"""Macros tab: list, create, edit and run macro sequences."""
+"""Macros tab: list, create, edit, run and stop macro sequences.
+
+The user turns a macro on and off (Run / Stop) -- that is the only macro
+state there is; there is no pause button and no start-paused option.
+Stop-trigger/start-trigger are ordinary *actions* inside each macro's action
+list that trigger or untrigger other actions based on screen rules; the engine
+watches the screen for those rules automatically while the macro runs.
+"""
 
 from __future__ import annotations
 
 from typing import Callable
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
@@ -26,19 +34,24 @@ class MacrosTab(QWidget):
         self,
         on_changed: Callable[[list[MacroConfig]], None],
         on_run: Callable[[MacroConfig], None],
+        on_stop: Callable[[MacroConfig], None],
         stop_hotkey_provider: Callable[[], str] = lambda: "f8",
+        engine=None,
         parent: QWidget | None = None,
     ) -> None:
+        """*engine* is the :class:`~core.macro_engine.MacroEngine` (optional so
+        the tab stays usable in tests without one); it only provides live
+        run-state info shown in the table (e.g. which macros are running)."""
         super().__init__(parent)
         self._on_changed = on_changed
         self._on_run = on_run
+        self._on_stop = on_stop
         self._stop_hotkey_provider = stop_hotkey_provider
+        self._engine = engine
         self._macros: list[MacroConfig] = []
 
-        self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels(
-            ["Name", "Hotkey", "Loops", "Actions", "Start condition", "Stop condition"]
-        )
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["Name", "Hotkey", "Loops", "Actions"])
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -60,8 +73,14 @@ class MacrosTab(QWidget):
         run_row = QHBoxLayout()
         self._run_button = QPushButton("▶ Run selected macro")
         self._run_button.clicked.connect(self._run_selected)
+        self._stop_button = QPushButton("■ Stop selected macro")
+        self._stop_button.setStyleSheet(
+            "background-color:#c0392b; color:white; font-weight:bold;"
+        )
+        self._stop_button.clicked.connect(self._stop_selected)
         self._status = QLabel("")
         run_row.addWidget(self._run_button)
+        run_row.addWidget(self._stop_button)
         run_row.addWidget(self._status)
         run_row.addStretch()
 
@@ -69,6 +88,12 @@ class MacrosTab(QWidget):
         layout.addLayout(toolbar)
         layout.addWidget(self._table)
         layout.addLayout(run_row)
+
+        # Poll the engine so the table reflects live run state.
+        self._state_timer = QTimer(self)
+        self._state_timer.setInterval(750)
+        self._state_timer.timeout.connect(self._refresh_run_state)
+        self._state_timer.start()
 
     # ------------------------------------------------------------------
     # Public API
@@ -112,8 +137,6 @@ class MacrosTab(QWidget):
                 loops=copy.loops,
                 interval_ms=copy.interval_ms,
                 actions=copy.actions,
-                start_condition=copy.start_condition,
-                stop_condition=copy.stop_condition,
             )
         )
         self._commit()
@@ -128,6 +151,13 @@ class MacrosTab(QWidget):
         index = self._selected_index()
         if index is not None:
             self._on_run(self._macros[index])
+            self._refresh_run_state()
+
+    def _stop_selected(self) -> None:
+        index = self._selected_index()
+        if index is not None:
+            self._on_stop(self._macros[index])
+            self._refresh_run_state()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -150,8 +180,19 @@ class MacrosTab(QWidget):
                 macro.start_hotkey or "—",
                 loops,
                 str(len(macro.actions)),
-                macro.start_condition.description if macro.start_condition else "—",
-                macro.stop_condition.description if macro.stop_condition else "—",
             )
             for column, value in enumerate(values):
                 self._table.setItem(row, column, QTableWidgetItem(value))
+        self._refresh_run_state()
+
+    def _refresh_run_state(self) -> None:
+        """Mark running macros with ▶ and keep their name cell truthful."""
+        if self._engine is None:
+            return
+        running = set(self._engine.running_macros())
+        for row, macro in enumerate(self._macros):
+            item = self._table.item(row, 0)
+            if item is None:
+                continue
+            base = macro.name
+            item.setText(f"▶ {base}" if macro.name in running else base)

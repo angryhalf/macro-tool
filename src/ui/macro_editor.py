@@ -1,15 +1,22 @@
-"""Macro editor: start/stop screen conditions, actions and input recording.
+"""Macro editor: actions, stop-trigger/start-trigger flow steps and input recording.
 
-* :class:`ConditionEditor` (in :mod:`ui.condition_editor`) is embedded twice in
-  the macro dialog -- once as an optional *start condition* gate and once as a
-  *stop condition* interrupt.
-* :class:`ActionEditorDialog` -- edit one keyboard/mouse step; every action
-  type shows only the fields it needs, and *Record* buttons capture live
-  keyboard/mouse input through pynput.
+* :class:`ActionEditorDialog` -- edit one step of a macro's action list.  On
+  top of the keyboard/mouse kinds there are three *flow-control* actions that
+  carry a screen condition (built with :class:`ConditionEditor` from
+  :mod:`ui.condition_editor`):
+
+  - **Wait until** (``wait_for``) blocks until the rule holds on screen.
+  - **Stop trigger** (``stop_trigger``) opens a stretch whose actions are held back
+    while the rule is present on screen.
+  - **Start trigger** (``start_trigger``) closes that stretch (and can itself wait
+    for its rule before execution continues).
+
+  Every action type shows only the fields it needs, and *Record* buttons
+  capture live keyboard/mouse input through pynput.
 * :class:`MacroRecorderDialog` -- record an entire input session (keys,
   clicks, moves, scrolls, timings) into an ordered action list in one go.
-* :class:`MacroEditorDialog` -- edit a macro: metadata, conditions, plus its
-  action table.
+* :class:`MacroEditorDialog` -- edit a macro: metadata (name, hotkey,
+  looping), plus its action table.
 """
 
 from __future__ import annotations
@@ -39,12 +46,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.settings import ActionConfig, MacroConfig
+from app.conditions import ScreenCondition
+from app.settings import CONDITION_ACTION_KINDS, ActionConfig, MacroConfig
 from services.input import InputRecorder, current_mouse_position
 from ui.condition_editor import ConditionEditor
 from ui.widgets import HotkeyButton
 
-#: Human label -> action kind understood by ``services.input.perform_action``.
+#: Human label -> action kind understood by ``services.input.perform_action``
+#: (the last three are flow-control kinds handled by the macro engine).
 ACTION_KINDS: dict[str, str] = {
     "Press key": "key",
     "Hold key": "hold_key",
@@ -58,11 +67,33 @@ ACTION_KINDS: dict[str, str] = {
     "Drag": "drag",
     "Scroll": "scroll",
     "Wait": "wait",
+    "Wait until (screen)": "wait_for",
+    "Stop trigger (screen)": "stop_trigger",
+    "Start trigger (screen)": "start_trigger",
 }
 
 BUTTONS = ["left", "right", "middle"]
 
 _KEY_FIELD_HINT = "One press of the key when the macro runs (e.g. a, space, f5, enter)."
+
+_CONDITION_HINTS: dict[str, str] = {
+    "wait_for": (
+        "Execution stops here until this screen event appears; the optional "
+        "give-up timeout ends the macro if it never happens."
+    ),
+    "stop_trigger": (
+        "Triggers off every action written after this step while this screen "
+        "event is present on screen, and triggers them back on as soon as it "
+        "clears (the screen is watched automatically).  Without a rule it "
+        "opens a stretch whose actions stay held until the next 'Start "
+        "trigger' step closes it."
+    ),
+    "start_trigger": (
+        "Triggers on every action written after this step as soon as this "
+        "screen event appears; until then those actions stay held.  Without "
+        "a rule it simply releases the hold opened by the last 'Stop trigger'."
+    ),
+}
 
 
 class _FieldRow(QHBoxLayout):
@@ -99,6 +130,11 @@ class ActionEditorDialog(QDialog):
 
         self._pages = QStackedWidget()
         self._page_for_kind: dict[str, QWidget] = {}
+        self._condition_editors: dict[str, ConditionEditor] = {}
+        # One shared screen-rule editor reused by every flow-control kind.
+        # Built *before* the per-kind pages so their default values can read
+        # the action being edited (e.g. a wait_for's give-up timeout).
+        self._condition_page, self._shared_condition = self._build_shared_condition_page(action)
         self._add_page("key", self._build_key_page(action))
         self._add_page("hold_key", self._build_hold_page(action))
         self._add_page("combo", self._build_combo_page(action))
@@ -111,6 +147,14 @@ class ActionEditorDialog(QDialog):
         self._add_page("drag", self._build_drag_page(action))
         self._add_page("scroll", self._build_scroll_page(action))
         self._add_page("wait", self._build_wait_page(action))
+        # All three flow-control kinds share the single condition page above;
+        # it is registered for each kind so the stacked widget can show it.
+        for kind in ("wait_for", "stop_trigger", "start_trigger"):
+            self._add_page(kind, self._condition_page)
+        # The dict keeps its original (per-kind editor) contract: every kind
+        # maps to the same shared editor instance.
+        for kind in ("wait_for", "stop_trigger", "start_trigger"):
+            self._condition_editors[kind] = self._shared_condition
 
         self._kind.currentIndexChanged.connect(self._show_page)
 
@@ -281,6 +325,30 @@ class ActionEditorDialog(QDialog):
         form.addRow("Wait:", self._wait_duration)
         return page
 
+    def _build_shared_condition_page(self, action: ActionConfig) -> tuple[QWidget, ConditionEditor]:
+        """Page for the flow-control actions (``wait_for``/``stop_trigger``/``start_trigger``).
+
+        All three kinds share this one page -- a single :class:`ConditionEditor`
+        so the screen rule lives *on the action itself* and stays intact while
+        the user flips between the three entries in the Type combo.  The hint
+        text at the top swaps per kind (see :meth:`_show_page`) and the
+        give-up timeout row is only shown for ``wait_for``.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self._condition_hint = QLabel(_CONDITION_HINTS["wait_for"])
+        self._condition_hint.setWordWrap(True)
+        self._condition_hint.setStyleSheet("color: gray;")
+        layout.addWidget(self._condition_hint)
+        editor = ConditionEditor(show_timeout=True)
+        # Seed defaults from the action being edited (its own condition plus
+        # the wait_for give-up timeout stored in duration_ms).
+        editor.load(action.condition if action.condition is not None else ScreenCondition(template_path=""))
+        editor.timeout_spin.setValue(max(0, min(editor.timeout_spin.maximum(), action.duration_ms)))
+        self._shared_condition = editor
+        layout.addWidget(editor)
+        return page, editor
+
     @staticmethod
     def _position_spins(action: ActionConfig) -> tuple[QSpinBox, QSpinBox]:
         x = QSpinBox(minimum=-32000, maximum=32000, value=action.x or 0)
@@ -291,7 +359,11 @@ class ActionEditorDialog(QDialog):
     # Navigation between pages
     # ------------------------------------------------------------------
     def _show_page(self) -> None:
-        page = self._page_for_kind.get(self._kind.currentData())
+        kind = self._kind.currentData()
+        if kind in _CONDITION_HINTS:  # a flow-control action
+            self._condition_hint.setText(_CONDITION_HINTS[kind])
+            self._shared_condition.set_timeout_visible(kind == "wait_for")
+        page = self._page_for_kind.get(kind)
         if page is not None:
             self._pages.setCurrentWidget(page)
 
@@ -524,6 +596,16 @@ class ActionEditorDialog(QDialog):
             return ActionConfig(kind=kind, amount=self._scroll_amount.value())
         if kind == "wait":
             return ActionConfig(kind=kind, duration_ms=self._wait_duration.value())
+        if kind in CONDITION_ACTION_KINDS:
+            editor = self._condition_editors.get(kind)
+            condition = editor.build() if editor is not None else None
+            duration_ms = 0
+            if condition is not None and not condition.configured:
+                condition = None
+            elif kind == "wait_for" and condition is not None:
+                # Give-up timeout lives on the action's duration_ms field.
+                duration_ms = condition.timeout_ms
+            return ActionConfig(kind=kind, condition=condition, duration_ms=duration_ms)
         return ActionConfig(kind=kind)
 
 
@@ -795,15 +877,13 @@ class MacroEditorDialog(QDialog):
 
     Layout top-to-bottom:
 
-    * **General** -- name, start hotkey, repeat/loops/interval.
-    * **Start condition** (optional) -- a :class:`ScreenCondition` gate; when
-      enabled, the macro waits until the screen matches before running.  A
-      timeout can be configured so the wait eventually gives up.
-    * **Stop condition** (optional) -- a :class:`ScreenCondition` interrupt;
-      while the macro runs, this rule is polled and cancels it as soon as it
-      holds on screen.
-    * **Actions** -- an ordered table of keyboard/mouse steps with add/edit/
-      remove/reorder controls plus a whole-session recorder.
+    * **General** -- name, start hotkey, repeat/loops and loop interval.
+      The user turns the macro on and off; there is no separate pause state.
+    * **Actions** -- an ordered table of steps with add/edit/remove/reorder
+      controls plus a whole-session recorder.  The triggers are *actions*:
+      insert a "Stop trigger" step to open a gated stretch and a "Start
+      trigger" step to close it -- everything written between them is held back
+      while the stop-trigger step's screen rule is present on screen.
     """
 
     def __init__(
@@ -836,37 +916,6 @@ class MacroEditorDialog(QDialog):
         meta_form.addRow("Loop interval:", self._interval)
         meta_box = QGroupBox("General")
         meta_box.setLayout(meta_form)
-
-        # -- start / stop conditions -----------------------------------
-        self._start_enabled = QCheckBox("Wait for a screen event before starting")
-        self._start_editor = ConditionEditor(show_timeout=True)
-        self._start_enabled.toggled.connect(self._start_editor.setVisible)
-        if macro.start_condition is not None:
-            self._start_enabled.setChecked(True)
-            self._start_editor.load(macro.start_condition)
-        else:
-            self._start_editor.load(None)
-            self._start_editor.clear()
-            self._start_editor.setVisible(False)
-        start_box = QGroupBox("Start condition")
-        start_layout = QVBoxLayout(start_box)
-        start_layout.addWidget(self._start_enabled)
-        start_layout.addWidget(self._start_editor)
-
-        self._stop_enabled = QCheckBox("Stop automatically when the screen changes")
-        self._stop_editor = ConditionEditor(show_timeout=False)
-        self._stop_enabled.toggled.connect(self._stop_editor.setVisible)
-        if macro.stop_condition is not None:
-            self._stop_enabled.setChecked(True)
-            self._stop_editor.load(macro.stop_condition)
-        else:
-            self._stop_editor.load(None)
-            self._stop_editor.clear()
-            self._stop_editor.setVisible(False)
-        stop_box = QGroupBox("Stop condition")
-        stop_layout = QVBoxLayout(stop_box)
-        stop_layout.addWidget(self._stop_enabled)
-        stop_layout.addWidget(self._stop_editor)
 
         # -- actions ---------------------------------------------------
         self._table = QTableWidget(0, 2)
@@ -904,8 +953,6 @@ class MacroEditorDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(meta_box)
-        layout.addWidget(start_box)
-        layout.addWidget(stop_box)
         layout.addWidget(actions_box, 1)
         layout.addWidget(buttons)
 
@@ -919,6 +966,7 @@ class MacroEditorDialog(QDialog):
     def describe(action: ActionConfig) -> tuple[str, str]:
         """Human-readable (type, details) pair for the action table."""
         where = "" if action.x is None else f" at ({action.x}, {action.y})"
+        cond = MacroEditorDialog._describe_condition(action)
         labels = {
             "key": ("Press key", action.key),
             "hold_key": ("Hold key", f"{action.key} for {action.duration_ms} ms"),
@@ -935,8 +983,22 @@ class MacroEditorDialog(QDialog):
             ),
             "scroll": ("Scroll", str(action.amount)),
             "wait": ("Wait", f"{action.duration_ms} ms"),
+            "wait_for": ("Wait until", cond),
+            "stop_trigger": ("Stop trigger", cond),
+            "start_trigger": ("Start trigger", cond),
         }
         return labels.get(action.kind, (action.kind, ""))
+
+    @staticmethod
+    def _describe_condition(action: ActionConfig) -> str:
+        """Short summary of a flow action's screen rule for the table."""
+        condition = action.condition
+        if condition is None or not condition.configured:
+            return "no rule configured"
+        parts = [condition.description]
+        if action.duration_ms:
+            parts.append(f"gives up after {action.duration_ms} ms")
+        return ", ".join(part for part in parts if part) or "rule configured"
 
     def _reload_table(self) -> None:
         self._table.setRowCount(len(self._actions))
@@ -995,20 +1057,4 @@ class MacroEditorDialog(QDialog):
             loops=self._loops.value(),
             interval_ms=self._interval.value(),
             actions=tuple(self._actions),
-            start_condition=self._build_start_condition(),
-            stop_condition=self._build_stop_condition(),
         )
-
-    def _build_start_condition(self):
-        """Return the enabled start condition, or ``None`` when disabled/empty."""
-        if not self._start_enabled.isChecked():
-            return None
-        condition = self._start_editor.build()
-        return condition if condition.configured else None
-
-    def _build_stop_condition(self):
-        """Return the enabled stop condition, or ``None`` when disabled/empty."""
-        if not self._stop_enabled.isChecked():
-            return None
-        condition = self._stop_editor.build()
-        return condition if condition.configured else None

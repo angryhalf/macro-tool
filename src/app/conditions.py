@@ -1,9 +1,11 @@
-"""Screen-condition dataclass shared by macros and background watchers.
+"""Screen-condition dataclass used by macro flow-control actions.
 
 A :class:`ScreenCondition` describes one rule the app reacts to on screen:
 an image appearing or disappearing (template matching) or a region changing
-(pixel-difference detection).  Macros embed up to two of them (a start gate
-and a stop trigger); the watcher engine polls standalone ones.
+(pixel-difference detection).  ``wait_for`` / ``stop_trigger`` / ``start_trigger`` macro
+actions each embed one of these; while a macro runs, the engine's background
+monitor evaluates the armed rules automatically -- no separate watcher setup
+is needed.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ class ScreenCondition:
         confidence: Minimum normalized match score in [0, 1] for image modes.
         change_threshold: Mean per-pixel difference that counts as "changed".
         poll_interval_ms: How often the screen is sampled.
-        timeout_ms: Give up waiting after this long (start conditions only;
+        timeout_ms: Give up waiting after this long (initial wait_for only;
             0 disables the timeout).
         region: Screen rectangle (left, top, width, height) to watch.
     """
