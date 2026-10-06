@@ -114,11 +114,16 @@ def _to_ms_button(name: str) -> ms.Button:
     return _BUTTONS.get(name, ms.Button.left)
 
 
+def is_modifier_name(name: str) -> bool:
+    """True when a pynput-style key name denotes a modifier (``ctrl``, ``shift_l``, ...)."""
+    return name in MODIFIER_NAMES or name.startswith(("ctrl", "alt", "shift", "cmd"))
+
+
 def sort_combo(combo: str) -> str:
     """Normalize a ``"a+ctrl"`` string into modifier-first order ``"ctrl+a"``."""
     parts = [p.strip().lower() for p in combo.split("+") if p.strip()]
-    modifiers = sorted(p for p in parts if p in MODIFIER_NAMES)
-    others = [p for p in parts if p not in MODIFIER_NAMES]
+    modifiers = sorted(p for p in parts if is_modifier_name(p))
+    others = [p for p in parts if not is_modifier_name(p)]
     return "+".join(modifiers + others)
 
 
@@ -324,14 +329,16 @@ class HotkeyManager:
     # Public API
     # ------------------------------------------------------------------
     def set_hotkeys(self, bindings: Iterable[tuple[str, Callable[[], None]]]) -> None:
-        """Replace all registrations with *bindings* ((combo string, callback))."""
+        """Replace all registrations with *bindings* ((combo string, callback)).
+
+        Duplicate combos are dropped by the caller (``MacroEngine._sync_hotkeys``),
+        which knows the macro names for a meaningful warning; dict insertion
+        order makes the first binding win here.
+        """
         rebuilt: dict[frozenset[HotkeyKey], Callable[[], None]] = {}
         for combo, callback in bindings:
             parsed = self.parse_combo(combo)
             if parsed is None:
-                continue
-            if parsed in rebuilt:
-                logger.warning("Duplicate hotkey '%s' ignored", combo)
                 continue
             rebuilt[parsed] = callback
 

@@ -479,7 +479,7 @@ class ActionEditorDialog(QDialog):
     def _record_single_key(self, target: QLineEdit) -> None:
         """Capture exactly one non-modifier key press into *target*."""
         def handle(name: str) -> bool:
-            if name.startswith(("ctrl", "alt", "shift", "cmd")):
+            if is_modifier_name(name):
                 return False
             self._run_on_gui(lambda: target.setText(name))
             return True
@@ -492,9 +492,9 @@ class ActionEditorDialog(QDialog):
 
         def handle(name: str) -> bool:
             pressed.add(name)
-            if name.startswith(("ctrl", "alt", "shift", "cmd")):
+            if is_modifier_name(name):
                 return False
-            modifiers = sorted(p for p in pressed if p.startswith(("ctrl", "alt", "shift", "cmd")))
+            modifiers = sorted(p for p in pressed if is_modifier_name(p))
             base = name.split("_")[0] if "_" in name else name
             combo = "+".join(modifiers + [base])
             self._run_on_gui(lambda: self._combo.setText(combo))
@@ -507,7 +507,7 @@ class ActionEditorDialog(QDialog):
         state: dict[str, float] = {}
 
         def on_press(name: str) -> bool:
-            if name.startswith(("ctrl", "alt", "shift", "cmd")):
+            if is_modifier_name(name):
                 return False
             state["press_at"] = time.monotonic()
             key_edit = self._key_fields["hold_key"]
