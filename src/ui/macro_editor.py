@@ -905,18 +905,30 @@ class MacroRecorderDialog(QDialog):
 
     # ------------------------------------------------------------------
     def _refresh_table(self) -> None:
+        """Show the recorded events, appending only rows that are new.
+
+        The recorder's event list is append-only while recording, so a full
+        rebuild every 400 ms was pure waste (and reset selection/scroll);
+        track how many rows are already displayed and add just the delta.
+        ``setRowCount`` shrinking handles the clear-on-restart case.
+        """
         with self._lock:
             events = list(self._events)
         self._count_label.setText(f"{len(events)} events")
-        scroll_to_bottom = self._table.verticalScrollBar()
-        at_bottom = scroll_to_bottom.value() >= scroll_to_bottom.maximum() - 4
-        self._table.setRowCount(len(events))
-        for row, (stamp, kind, payload) in enumerate(events):
+        scroll_bar = self._table.verticalScrollBar()
+        at_bottom = scroll_bar.value() >= scroll_bar.maximum() - 4
+        existing = self._table.rowCount()
+        if len(events) < existing:
+            self._table.setRowCount(len(events))
+            existing = len(events)
+        for row in range(existing, len(events)):
+            stamp, kind, payload = events[row]
+            self._table.insertRow(row)
             self._table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
             self._table.setItem(row, 1, QTableWidgetItem(f"{stamp:.2f}s"))
             self._table.setItem(row, 2, QTableWidgetItem(_describe_event(kind, payload)))
         if at_bottom:
-            scroll_to_bottom.setValue(scroll_to_bottom.maximum())
+            scroll_bar.setValue(scroll_bar.maximum())
 
     def actions(self) -> list[ActionConfig]:
         """Convert the recorded events into a compact action sequence."""

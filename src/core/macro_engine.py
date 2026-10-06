@@ -163,6 +163,9 @@ class MacroEngine:
         # Guards one-time creation of the monitor thread (start_macro can be
         # called from any thread -- GUI, hotkey listener, tests).
         self._monitor_lock = threading.Lock()
+        # Woken whenever a macro starts/stops so the monitor can park in the
+        # idle case instead of busy-looping at 50 ms forever.
+        self._work_available = threading.Event()
         self.on_state_changed: Callable[[], None] | None = None  # called after start/stop events
 
     # ------------------------------------------------------------------
@@ -250,17 +253,11 @@ class MacroEngine:
                 return existing
             self._tokens.add(token)
             self._macro_tokens[macro.name] = token
+        # Wake the (possibly parked) monitor thread so it starts watching this
+        # macro's rules without waiting for its bounded idle timeout.
+        self._work_available.set()
         thread.start()
         self._notify()
-        return token
-
-    def run_actions(self, actions: tuple[ActionConfig, ...], name: str = "actions") -> ExecutionToken:
-        """Run a one-shot action list in the background."""
-        token = ExecutionToken()
-        thread = threading.Thread(target=self._run_actions, args=(actions, token), name=name, daemon=True)
-        with self._lock:
-            self._tokens.add(token)
-        thread.start()
         return token
 
     def stop_all(self) -> None:
@@ -293,11 +290,10 @@ class MacroEngine:
     def shutdown(self) -> None:
         """Stop everything and unregister global hotkeys (on app exit)."""
         self.stop_all()
+        # Wake the monitor thread so it observes cancellation and exits
+        # instead of lingering in a parked wait until process teardown.
+        self._work_available.set()
         self._hotkeys.stop()
-
-    def is_busy(self) -> bool:
-        with self._lock:
-            return bool(self._tokens)
 
     # ------------------------------------------------------------------
     # Running macros (introspection for the UI)
@@ -324,6 +320,11 @@ class MacroEngine:
     def _notify(self) -> None:
         if self.on_state_changed:
             self.on_state_changed()
+
+    def running_count(self) -> int:
+        """Cheap idle check used by the monitor loop (no dict copy)."""
+        with self._lock:
+            return len(self._tokens)
 
     # ------------------------------------------------------------------
     # Worker bodies
@@ -537,9 +538,18 @@ class MacroEngine:
             ).start()
 
     def _monitor_loop(self) -> None:
-        """Watch the screen for every running macro's armed trigger rules."""
+        """Watch the screen for every running macro's armed trigger rules.
+
+        Parks on ``_work_available`` while no macro is running instead of
+        busy-sleeping at 50 ms forever; start/stop events wake it promptly,
+        and the bounded wait covers any path that forgets to signal.
+        """
         last_notify = 0.0
         while True:
+            if self.running_count() == 0:
+                self._work_available.wait(1.0)
+                self._work_available.clear()
+                continue
             changed = False
             for token in self.running_macros().values():
                 if token.cancelled:
@@ -549,7 +559,8 @@ class MacroEngine:
             if changed and time.monotonic() - last_notify > 0.4:
                 last_notify = time.monotonic()
                 self._notify()  # let the UI refresh its status line
-            time.sleep(0.05)
+            self._work_available.wait(0.05)
+            self._work_available.clear()
 
     @staticmethod
     def _rule_blocks_now(entry: dict) -> bool:

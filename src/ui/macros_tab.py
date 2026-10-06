@@ -49,6 +49,9 @@ class MacrosTab(QWidget):
         self._stop_hotkey_provider = stop_hotkey_provider
         self._engine = engine
         self._macros: list[MacroConfig] = []
+        # Snapshot of the running-macro set from the last refresh; the poll
+        # timer compares against it and only rewrites cells on a real change.
+        self._last_running: frozenset[str] = frozenset()
 
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["Name", "Hotkey", "Loops", "Actions"])
@@ -89,10 +92,11 @@ class MacrosTab(QWidget):
         layout.addWidget(self._table)
         layout.addLayout(run_row)
 
-        # Poll the engine so the table reflects live run state.
+        # Fallback poll so the table reflects live run state even if an
+        # engine event was missed; cheap no-op when nothing changed.
         self._state_timer = QTimer(self)
         self._state_timer.setInterval(750)
-        self._state_timer.timeout.connect(self._refresh_run_state)
+        self._state_timer.timeout.connect(self._poll_run_state)
         self._state_timer.start()
 
     # ------------------------------------------------------------------
@@ -191,9 +195,25 @@ class MacrosTab(QWidget):
         if self._engine is None:
             return
         running = set(self._engine.running_macros())
+        self._last_running = frozenset(running)
         for row, macro in enumerate(self._macros):
             item = self._table.item(row, 0)
             if item is None:
                 continue
             base = macro.name
             item.setText(f"▶ {base}" if macro.name in running else base)
+
+    def _poll_run_state(self) -> None:
+        """Timer tick: only touch the table when the run set actually changed.
+
+        Engine start/stop events already refresh via ``set_engine``; this
+        fallback poll exists to catch state changes that missed a signal, so
+        it does a cheap comparison instead of rewriting every name cell each
+        tick (which reset selection styling and repainted needlessly).
+        """
+        if self._engine is None:
+            return
+        current = frozenset(self._engine.running_macros())
+        if current != self._last_running:
+            self._last_running = current
+            self._refresh_run_state()
