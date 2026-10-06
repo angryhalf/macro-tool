@@ -47,7 +47,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.conditions import ScreenCondition
-from app.settings import CONDITION_ACTION_KINDS, ActionConfig, MacroConfig
+from app.settings import CONDITION_ACTION_KINDS, ActionConfig, MacroConfig, new_macro_uid
 from services.input import (
     InputRecorder,
     current_mouse_position,
@@ -966,6 +966,8 @@ class MacroEditorDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._stop_hotkey = stop_hotkey
+        # Preserve identity across edits; stamp a fresh uid for brand-new macros.
+        self._uid = macro.uid or new_macro_uid()
         self.setWindowTitle(f"Edit macro — {macro.name}")
         self.setMinimumSize(680, 620)
 
@@ -1129,4 +1131,5 @@ class MacroEditorDialog(QDialog):
             loops=self._loops.value(),
             interval_ms=self._interval.value(),
             actions=tuple(self._actions),
+            uid=self._uid,
         )

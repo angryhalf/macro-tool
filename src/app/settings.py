@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid as _uuid
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,11 @@ from typing import Any
 from app.conditions import ScreenCondition
 
 DEFAULT_SETTINGS_PATH = Path("data") / "settings.json"
+
+
+def new_macro_uid() -> str:
+    """Return a fresh stable identity string for a :class:`MacroConfig`."""
+    return _uuid.uuid4().hex
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,9 @@ class MacroConfig:
     loops: int = 1  # ignored when repeat is True
     interval_ms: int = 0  # delay between loops
     actions: tuple[ActionConfig, ...] = ()
+    #: Stable identity across renames.  Never displayed; lets the window
+    #: detect real renames instead of guessing from name-set differences.
+    uid: str = ""
 
 
 @dataclass(frozen=True)
@@ -101,7 +110,7 @@ def _condition_from_dict(raw: Any) -> ScreenCondition | None:
 
 def _macro_from_dict(raw: Any) -> MacroConfig:
     if not isinstance(raw, dict):
-        return MacroConfig()
+        return MacroConfig(uid=new_macro_uid())
 
     known = {k: v for k, v in raw.items() if k in MacroConfig.__dataclass_fields__ and k != "actions"}
     raw_actions = raw.get("actions", [])
@@ -109,6 +118,9 @@ def _macro_from_dict(raw: Any) -> MacroConfig:
         raw_actions = []
     actions = [_action_from_dict(a) for a in raw_actions]
     actions = _migrate_legacy_conditions(raw, actions)
+    # Older files predate the uid field; assign a fresh stable identity.
+    if not str(known.get("uid", "")):
+        known["uid"] = new_macro_uid()
     return MacroConfig(actions=tuple(actions), **known)
 
 

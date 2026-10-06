@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.settings import MacroConfig
+from app.settings import MacroConfig, new_macro_uid
 from ui.macro_editor import MacroEditorDialog
 
 
@@ -137,6 +137,7 @@ class MacrosTab(QWidget):
                 loops=copy.loops,
                 interval_ms=copy.interval_ms,
                 actions=copy.actions,
+                uid=new_macro_uid(),  # a copy is a distinct macro identity
             )
         )
         self._commit()

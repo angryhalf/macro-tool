@@ -160,6 +160,9 @@ class MacroEngine:
         self._hotkeys = HotkeyManager()
         self._settings = AppSettings()
         self._monitor_started = False
+        # Guards one-time creation of the monitor thread (start_macro can be
+        # called from any thread -- GUI, hotkey listener, tests).
+        self._monitor_lock = threading.Lock()
         self.on_state_changed: Callable[[], None] | None = None  # called after start/stop events
 
     # ------------------------------------------------------------------
@@ -168,7 +171,8 @@ class MacroEngine:
     @property
     def settings(self) -> AppSettings:
         """The most recently applied settings snapshot."""
-        return self._settings
+        with self._lock:
+            return self._settings
 
     def apply_settings(self, settings: AppSettings) -> None:
         """Store the latest settings and re-register macro hotkeys."""
@@ -226,6 +230,12 @@ class MacroEngine:
                 action.condition is None or not action.condition.configured
             ):
                 logger.warning("Macro '%s': %s action has no usable condition", macro.name, action.kind)
+        # The background monitor is what makes stop_trigger/start_trigger rules fire at
+        # all.  Start it lazily here so *every* entry point (GUI button, global
+        # hotkey, programmatic use) gets screen watching -- previously only the
+        # main-window constructor started it, leaving hotkey-triggered macros in
+        # headless/embedded setups blocked forever.
+        self.start_monitor()
         token = ExecutionToken()
         thread = threading.Thread(
             target=self._run_macro,
@@ -455,7 +465,10 @@ class MacroEngine:
                 token.wait_while_blocked()  # don't fire while triggered off
                 if token.cancelled:
                     return False
-                perform_action(action)
+                # Pass the cancellation predicate so long actions (key holds,
+                # typing runs, waits) abort promptly instead of blocking the
+                # emergency stop for their full duration.
+                perform_action(action, cancel=lambda: token.cancelled or token.gated)
             index += 1
         return True
 
@@ -515,8 +528,13 @@ class MacroEngine:
         """
         if self._monitor_started:
             return
-        self._monitor_started = True
-        threading.Thread(target=self._monitor_loop, name="macro-condition-monitor", daemon=True).start()
+        with self._monitor_lock:
+            if self._monitor_started:
+                return
+            self._monitor_started = True
+            threading.Thread(
+                target=self._monitor_loop, name="macro-condition-monitor", daemon=True
+            ).start()
 
     def _monitor_loop(self) -> None:
         """Watch the screen for every running macro's armed trigger rules."""
