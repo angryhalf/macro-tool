@@ -1,18 +1,26 @@
 """Macros tab: list, create, edit, run and stop macro sequences.
 
-The user turns a macro on and off (Run / Stop) -- that is the only macro
-state there is; there is no pause button and no start-paused option.
-Stop-trigger/start-trigger are ordinary *actions* inside each macro's action
-list that trigger or untrigger other actions based on screen rules; the engine
-watches the screen for those rules automatically while the macro runs.
+Each macro has an *enabled* checkbox (disabled macros ignore their hotkey
+and Run clicks -- park a misbehaving macro without deleting it) and can be
+exported to / imported from a single-macro JSON file for sharing.  Stop-
+trigger/start-trigger are ordinary *actions* inside each macro's action
+list that trigger or untrigger other actions based on screen rules; the
+engine watches the screen for those rules automatically while the macro
+runs.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
+from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from dataclasses import replace
+
+from PySide6.QtGui import QBrush
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -23,8 +31,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.settings import MacroConfig
+from app.settings import (
+    MacroConfig,
+    import_macro_files,
+    new_macro_uid,
+    save_macro_json,
+)
 from ui.macro_editor import MacroEditorDialog
+
+logger = logging.getLogger(__name__)
 
 
 class MacrosTab(QWidget):
@@ -49,14 +64,24 @@ class MacrosTab(QWidget):
         self._stop_hotkey_provider = stop_hotkey_provider
         self._engine = engine
         self._macros: list[MacroConfig] = []
+        # Snapshot of the running-macro set from the last refresh; the poll
+        # timer compares against it and only rewrites cells on a real change.
+        self._last_running: frozenset[str] = frozenset()
+        # True while a checkbox programmatic-toggle round-trip is in flight,
+        # so itemChanged does not treat our own write as a user click.
+        self._toggling = False
 
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["Name", "Hotkey", "Loops", "Actions"])
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table = QTableWidget(0, 5)
+        self._table.setHorizontalHeaderLabels(["", "Name", "Hotkey", "Loops", "Actions"])
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for column in range(1, 5):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.doubleClicked.connect(self._edit_selected)
+        self._table.itemChanged.connect(self._on_item_changed)
 
         toolbar = QHBoxLayout()
         for text, slot in (
@@ -64,6 +89,8 @@ class MacrosTab(QWidget):
             ("Edit macro", self._edit_selected),
             ("Duplicate", self._duplicate_selected),
             ("Remove", self._remove_selected),
+            ("Export…", self._export_selected),
+            ("Import…", self._import_macros),
         ):
             button = QPushButton(text)
             button.clicked.connect(slot)
@@ -89,10 +116,11 @@ class MacrosTab(QWidget):
         layout.addWidget(self._table)
         layout.addLayout(run_row)
 
-        # Poll the engine so the table reflects live run state.
+        # Fallback poll so the table reflects live run state even if an
+        # engine event was missed; cheap no-op when nothing changed.
         self._state_timer = QTimer(self)
         self._state_timer.setInterval(750)
-        self._state_timer.timeout.connect(self._refresh_run_state)
+        self._state_timer.timeout.connect(self._poll_run_state)
         self._state_timer.start()
 
     # ------------------------------------------------------------------
@@ -137,6 +165,8 @@ class MacrosTab(QWidget):
                 loops=copy.loops,
                 interval_ms=copy.interval_ms,
                 actions=copy.actions,
+                uid=new_macro_uid(),  # a copy is a distinct macro identity
+                enabled=copy.enabled,
             )
         )
         self._commit()
@@ -147,11 +177,59 @@ class MacrosTab(QWidget):
             del self._macros[index]
             self._commit()
 
+    def _export_selected(self) -> None:
+        """Write the selected macro to one JSON file for sharing."""
+        index = self._selected_index()
+        if index is None:
+            return
+        macro = self._macros[index]
+        safe = "".join(ch for ch in macro.name if ch.isalnum() or ch in "-_ ")[:60].strip()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export macro", f"{safe or 'macro'}.json", "Macro JSON (*.json *.macro)"
+        )
+        if not path:
+            return
+        try:
+            save_macro_json(macro, Path(path))
+        except OSError as exc:
+            self.set_status(f"Export failed: {exc}")
+            logger.warning("macro export failed: %s", exc)
+        else:
+            self.set_status(f"Exported “{macro.name}” to {path}")
+
+    def _import_macros(self) -> None:
+        """Add macros from exported JSON files (disabled, hotkey cleared)."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Import macro(s)", "", "Macro/settings JSON (*.json *.macro)"
+        )
+        if not paths:
+            return
+        added = 0
+        failures = []
+        for path in paths:
+            try:
+                self._macros.extend(import_macro_files([Path(path)], self._macros))
+                added += 1
+            except (OSError, ValueError) as exc:
+                failures.append(Path(path).name)
+                logger.warning("macro import failed for %s: %s", path, exc)
+        if added:
+            self._commit()
+        status = f"Imported {added} macro(s)" + (" (disabled, no hotkey)" if added else "")
+        if failures:
+            status += f"; skipped {len(failures)} unreadable file(s)"
+        self.set_status(status)
+
     def _run_selected(self) -> None:
         index = self._selected_index()
-        if index is not None:
-            self._on_run(self._macros[index])
-            self._refresh_run_state()
+        if index is None:
+            return
+        macro = self._macros[index]
+        if not macro.enabled:
+            self.set_status(f"“{macro.name}” is disabled — tick its checkbox or enable it in the editor first.")
+            return
+        self._on_run(macro)
+        self._refresh_run_state()
 
     def _stop_selected(self) -> None:
         index = self._selected_index()
@@ -172,27 +250,76 @@ class MacrosTab(QWidget):
         self._on_changed(self._macros)
 
     def _reload_table(self) -> None:
-        self._table.setRowCount(len(self._macros))
-        for row, macro in enumerate(self._macros):
-            loops = "∞" if macro.repeat else str(macro.loops)
-            values = (
-                macro.name,
-                macro.start_hotkey or "—",
-                loops,
-                str(len(macro.actions)),
-            )
-            for column, value in enumerate(values):
-                self._table.setItem(row, column, QTableWidgetItem(value))
+        self._toggling = True  # our own writes must not read as user toggles
+        try:
+            self._table.setRowCount(len(self._macros))
+            for row, macro in enumerate(self._macros):
+                loops = "∞" if macro.repeat else str(macro.loops)
+                check = QTableWidgetItem()
+                check.setFlags(
+                    Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                )
+                check.setCheckState(
+                    Qt.CheckState.Checked if macro.enabled else Qt.CheckState.Unchecked
+                )
+                check.setToolTip("Enable/disable this macro")
+                self._table.setItem(row, 0, check)
+                values = (
+                    macro.name,
+                    macro.start_hotkey or "—",
+                    loops,
+                    str(len(macro.actions)),
+                )
+                for column, value in enumerate(values, start=1):
+                    self._table.setItem(row, column, QTableWidgetItem(value))
+        finally:
+            self._toggling = False
         self._refresh_run_state()
 
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        """Checkbox toggle in the table: flip enabled and persist."""
+        if self._toggling or item.column() != 0:
+            return
+        row = item.row()
+        if not 0 <= row < len(self._macros):
+            return
+        enabled = item.checkState() == Qt.CheckState.Checked
+        if enabled == self._macros[row].enabled:
+            return
+        self._macros[row] = replace(self._macros[row], enabled=enabled)
+        state = "enabled" if enabled else "disabled"
+        logger.info("macro %r %s from list", self._macros[row].name, state)
+        self._commit()
+
     def _refresh_run_state(self) -> None:
-        """Mark running macros with ▶ and keep their name cell truthful."""
+        """Mark running macros with ▶ and disabled ones grayed + labeled."""
         if self._engine is None:
             return
         running = set(self._engine.running_macros())
+        self._last_running = frozenset(running)
         for row, macro in enumerate(self._macros):
-            item = self._table.item(row, 0)
+            item = self._table.item(row, 1)  # name column (0 is the checkbox)
             if item is None:
                 continue
-            base = macro.name
-            item.setText(f"▶ {base}" if macro.name in running else base)
+            prefix = "▶ " if macro.name in running else ""
+            suffix = "" if macro.enabled else "  (disabled)"
+            item.setText(f"{prefix}{macro.name}{suffix}")
+            color = Qt.GlobalColor.black if macro.enabled else Qt.GlobalColor.gray
+            item.setForeground(QBrush(color))
+
+    def _poll_run_state(self) -> None:
+        """Timer tick: only touch the table when the run set actually changed.
+
+        Engine start/stop events already refresh via ``set_engine``; this
+        fallback poll exists to catch state changes that missed a signal, so
+        it does a cheap comparison instead of rewriting every name cell each
+        tick (which reset selection styling and repainted needlessly).
+        """
+        if self._engine is None:
+            return
+        current = frozenset(self._engine.running_macros())
+        if current != self._last_running:
+            self._last_running = current
+            self._refresh_run_state()

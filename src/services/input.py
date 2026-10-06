@@ -114,11 +114,16 @@ def _to_ms_button(name: str) -> ms.Button:
     return _BUTTONS.get(name, ms.Button.left)
 
 
+def is_modifier_name(name: str) -> bool:
+    """True when a pynput-style key name denotes a modifier (``ctrl``, ``shift_l``, ...)."""
+    return name in MODIFIER_NAMES or name.startswith(("ctrl", "alt", "shift", "cmd"))
+
+
 def sort_combo(combo: str) -> str:
     """Normalize a ``"a+ctrl"`` string into modifier-first order ``"ctrl+a"``."""
     parts = [p.strip().lower() for p in combo.split("+") if p.strip()]
-    modifiers = sorted(p for p in parts if p in MODIFIER_NAMES)
-    others = [p for p in parts if p not in MODIFIER_NAMES]
+    modifiers = sorted(p for p in parts if is_modifier_name(p))
+    others = [p for p in parts if not is_modifier_name(p)]
     return "+".join(modifiers + others)
 
 
@@ -128,8 +133,30 @@ def current_mouse_position() -> tuple[int, int]:
     return int(x), int(y)
 
 
-def perform_action(action: ActionConfig) -> None:
+def _interruptible_sleep(seconds: float, cancel: Callable[[], bool] | None = None) -> bool:
+    """Sleep up to *seconds*, waking early when *cancel* reports True.
+
+    Returns True when the full duration elapsed, False when cancelled.
+    Sleeping in short slices keeps long actions (a 600 s key hold, a slow
+    typing run) interruptible so an emergency stop takes effect promptly.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        if cancel is not None and cancel():
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(remaining, 0.05))
+
+
+def perform_action(action: ActionConfig, cancel: Callable[[], bool] | None = None) -> None:
     """Execute a single macro action via pynput (blocking).
+
+    *cancel* is an optional predicate checked between sleeps and between
+    individual input steps; when it returns True the action aborts as soon
+    as possible **while releasing every key/button it already pressed**, so
+    an emergency stop never leaves modifiers or mouse buttons stuck down.
 
     Flow-control kinds (``wait_for``, ``stop_trigger``, ``start_trigger``) are handled by
     :class:`~core.macro_engine.MacroEngine` itself and never reach real input
@@ -140,44 +167,50 @@ def perform_action(action: ActionConfig) -> None:
     if kind in ("wait_for", "stop_trigger", "start_trigger"):
         return
     if kind in ("key", "hold_key"):
-        _perform_key(kind, action.key, action.duration_ms)
+        _perform_key(kind, action.key, action.duration_ms, cancel)
     elif kind == "combo":
-        _perform_combo(action.combo)
+        _perform_combo(action.combo, cancel)
     elif kind == "type":
-        _perform_type(action.text, max(action.amount, 0))
+        _perform_type(action.text, max(action.amount, 0), cancel)
     elif kind == "move":
         if action.x is not None and action.y is not None:
             ms.Controller().position = (action.x, action.y)
     elif kind in ("click", "double_click"):
-        _perform_click(action.button, double=kind == "double_click", x=action.x, y=action.y)
+        _perform_click(action.button, double=kind == "double_click", x=action.x, y=action.y, cancel=cancel)
     elif kind == "mouse_down":
         ms.Controller().press(_to_ms_button(action.button))
     elif kind == "mouse_up":
         ms.Controller().release(_to_ms_button(action.button))
     elif kind == "drag":
-        _perform_drag(action)
+        _perform_drag(action, cancel)
     elif kind == "scroll":
         if action.amount:
             ms.Controller().scroll(0, action.amount)
     elif kind == "wait":
-        time.sleep(max(action.duration_ms, 0) / 1000.0)
+        _interruptible_sleep(max(action.duration_ms, 0) / 1000.0, cancel)
     else:
         logger.warning("Unknown action kind: %r", kind)
 
 
-def _perform_key(kind: str, name: str, duration_ms: int) -> None:
+def _perform_key(
+    kind: str, name: str, duration_ms: int, cancel: Callable[[], bool] | None = None
+) -> None:
     key = _to_kb_key(name)
     if key is None:
         logger.warning("Key action skipped: no key specified")
         return
     ctrl = kb.Controller()
     ctrl.press(key)
-    if kind == "hold_key":
-        time.sleep(max(duration_ms, 1) / 1000.0)
-    ctrl.release(key)
+    try:
+        if kind == "hold_key" and not _interruptible_sleep(max(duration_ms, 1) / 1000.0, cancel):
+            logger.info("Hold of %r cancelled; releasing key", name)
+    finally:
+        # Always release, even on cancellation -- otherwise the key stays
+        # physically "down" for the rest of the session.
+        ctrl.release(key)
 
 
-def _perform_combo(combo: str) -> None:
+def _perform_combo(combo: str, cancel: Callable[[], bool] | None = None) -> None:
     """Press all keys of ``"ctrl+shift+d"``, release them in reverse order."""
     names = [part.strip().lower() for part in combo.split("+") if part.strip()]
     keys = [_to_kb_key(name) for name in names]
@@ -187,40 +220,65 @@ def _perform_combo(combo: str) -> None:
     ctrl = kb.Controller()
     # ``keys`` was validated above, so every entry is a real pynput key.
     pressed = [key for key in keys if key is not None]
-    for key in pressed:
-        ctrl.press(key)  # pyright: ignore[reportArgumentType]
-    for key in reversed(pressed):
-        ctrl.release(key)  # pyright: ignore[reportArgumentType]
+    held: list = []
+    try:
+        for key in pressed:
+            if cancel is not None and cancel():
+                logger.info("Combo %r cancelled after %d key(s)", combo, len(held))
+                break
+            ctrl.press(key)  # pyright: ignore[reportArgumentType]
+            held.append(key)
+    finally:
+        # Release exactly what was pressed, in reverse -- never leave a
+        # modifier stuck down after a cancelled combo.
+        for key in reversed(held):
+            ctrl.release(key)  # pyright: ignore[reportArgumentType]
 
 
-def _perform_type(text: str, delay_ms: int) -> None:
+def _perform_type(text: str, delay_ms: int, cancel: Callable[[], bool] | None = None) -> None:
     """Type *text* one character at a time using a shared controller."""
     if not text:
         return
     ctrl = kb.Controller()
-    for char in text:
+    for index, char in enumerate(text):
+        if cancel is not None and cancel():
+            logger.info("Typing cancelled after %d char(s)", index)
+            return
         try:
             ctrl.type(char)
         except Exception as exc:  # noqa: BLE001 - controller errors are not typed
             logger.warning("Cannot type character %r: %s", char, exc)
-        if delay_ms > 0:
-            time.sleep(delay_ms / 1000.0)
+        if delay_ms > 0 and not _interruptible_sleep(delay_ms / 1000.0, cancel):
+            return
 
 
-def _perform_click(button_name: str, *, double: bool, x: int | None, y: int | None) -> None:
+def _perform_click(
+    button_name: str,
+    *,
+    double: bool,
+    x: int | None,
+    y: int | None,
+    cancel: Callable[[], bool] | None = None,
+) -> None:
     button = _to_ms_button(button_name)
     ctrl = ms.Controller()
     if x is not None and y is not None:
         ctrl.position = (x, y)
     clicks = 2 if double else 1
-    for _ in range(clicks):
+    for i in range(clicks):
+        if cancel is not None and cancel():
+            return
         ctrl.click(button)
-        if double:
-            time.sleep(0.03)
+        if double and i == 0:
+            _interruptible_sleep(0.03, cancel)
 
 
-def _perform_drag(action: ActionConfig) -> None:
-    """Press at (x, y), move to (amount, duration_ms fields), release."""
+def _perform_drag(action: ActionConfig, cancel: Callable[[], bool] | None = None) -> None:
+    """Press at (x, y), move to (amount, duration_ms fields), release.
+
+    The end position uses ``None``-checks rather than truthiness so that a
+    legitimate drag ending at coordinate 0 is honored.
+    """
     if action.x is None or action.y is None:
         logger.warning("Drag action missing start position")
         return
@@ -228,18 +286,24 @@ def _perform_drag(action: ActionConfig) -> None:
     ctrl = ms.Controller()
     steps = 15
     start_x, start_y = action.x, action.y
-    end_x = action.amount if action.amount else start_x
-    end_y = action.duration_ms if action.duration_ms else start_y
+    end_x = action.amount if action.amount is not None else start_x
+    end_y = action.duration_ms if action.duration_ms is not None else start_y
     ctrl.position = (start_x, start_y)
     ctrl.press(button)
-    for step in range(1, steps + 1):
-        frac = step / steps
-        ctrl.position = (
-            int(start_x + (end_x - start_x) * frac),
-            int(start_y + (end_y - start_y) * frac),
-        )
-        time.sleep(0.01)
-    ctrl.release(button)
+    try:
+        for step in range(1, steps + 1):
+            if cancel is not None and cancel():
+                logger.info("Drag cancelled at step %d/%d; releasing button", step, steps)
+                return
+            frac = step / steps
+            ctrl.position = (
+                int(start_x + (end_x - start_x) * frac),
+                int(start_y + (end_y - start_y) * frac),
+            )
+            _interruptible_sleep(0.01, cancel)
+    finally:
+        # Never leave the mouse button physically pressed.
+        ctrl.release(button)
 
 
 class HotkeyManager:
@@ -254,26 +318,40 @@ class HotkeyManager:
         self._lock = threading.Lock()
         self._hotkeys: dict[frozenset[HotkeyKey], Callable[[], None]] = {}
         self._pressed: set[HotkeyKey] = set()
+        # Combos that matched since the last full release; they re-arm only
+        # once every key of the combo is physically up again.  Without this,
+        # a held combo keeps firing on each additional key press (any superset
+        # of the pressed set still matches).
+        self._consumed: set[frozenset[HotkeyKey]] = set()
         self._listener: kb.Listener | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def set_hotkeys(self, bindings: Iterable[tuple[str, Callable[[], None]]]) -> None:
-        """Replace all registrations with *bindings* ((combo string, callback))."""
+        """Replace all registrations with *bindings* ((combo string, callback)).
+
+        Duplicate combos are dropped by the caller (``MacroEngine._sync_hotkeys``),
+        which knows the macro names for a meaningful warning; dict insertion
+        order makes the first binding win here.
+        """
         rebuilt: dict[frozenset[HotkeyKey], Callable[[], None]] = {}
         for combo, callback in bindings:
             parsed = self.parse_combo(combo)
             if parsed is None:
                 continue
-            if parsed in rebuilt:
-                logger.warning("Duplicate hotkey '%s' ignored", combo)
-                continue
             rebuilt[parsed] = callback
 
         with self._lock:
             self._hotkeys = rebuilt
-            self._pressed.clear()
+            # Do NOT clear ``_pressed`` here: physical keys may be mid-keystroke
+            # while the GUI re-syncs hotkeys (e.g. after any settings edit).
+            # Dropping the set would make held modifiers look unpressed and
+            # corrupt trigger matching.  Stale entries are pruned lazily by
+            # ``_on_release``; combos that vanished are cleaned up below.
+            stale = self._consumed - rebuilt.keys()
+            if stale:
+                self._consumed -= stale
             self._sync_locked()
 
     def stop(self) -> None:
@@ -332,11 +410,19 @@ class HotkeyManager:
             self._pressed.add(canonical)
 
             matched = max(
-                (combo for combo in self._hotkeys if combo.issubset(self._pressed)),
+                (
+                    combo
+                    for combo in self._hotkeys
+                    if combo not in self._consumed and combo.issubset(self._pressed)
+                ),
                 key=len,
                 default=None,
             )
             callback = self._hotkeys.get(matched) if matched is not None else None
+            if matched is not None:
+                # Fire once per physical press cycle: stay consumed until all
+                # of the combo's keys have been released (see _on_release).
+                self._consumed.add(matched)
 
         if callback is None:
             return None
@@ -351,6 +437,9 @@ class HotkeyManager:
             return None
         with self._lock:
             self._pressed.discard(_canonical_hotkey_key(key))
+            # Re-arm any combo whose keys are now fully released.
+            if self._consumed:
+                self._consumed = {combo for combo in self._consumed if not combo.isdisjoint(self._pressed)}
         return None
 
     @staticmethod
