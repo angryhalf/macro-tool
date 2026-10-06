@@ -38,6 +38,7 @@ from app.settings import (
     new_macro_uid,
     save_macro_json,
 )
+from services.input import describe_hotkey
 from ui.macro_editor import MacroEditorDialog
 from ui.theme import MUTED, apply_role
 
@@ -53,12 +54,16 @@ class MacrosTab(QWidget):
         on_run: Callable[[MacroConfig], None],
         on_stop: Callable[[MacroConfig], None],
         stop_hotkey_provider: Callable[[], str] = lambda: "f8",
+        on_stop_all: Callable[[], None] | None = None,
         engine=None,
         parent: QWidget | None = None,
     ) -> None:
         """*engine* is the :class:`~core.macro_engine.MacroEngine` (optional so
         the tab stays usable in tests without one); it only provides live
-        run-state info shown in the table (e.g. which macros are running)."""
+        run-state info shown in the table (e.g. which macros are running).
+
+        *on_stop_all*, when provided, adds a "STOP ALL" button beside the
+        per-macro run/stop buttons below the table."""
         super().__init__(parent)
         self._on_changed = on_changed
         self._on_run = on_run
@@ -127,6 +132,21 @@ class MacrosTab(QWidget):
         run_row.addWidget(self._status)
         run_row.addStretch()
 
+        # Global stop-all lives here too (right side), across from the
+        # per-macro run/stop buttons.
+        self._stop_all_button: QPushButton | None = None
+        if on_stop_all is not None:
+            self._stop_all_button = QPushButton(
+                f"■  STOP ALL · {describe_hotkey(stop_hotkey_provider())}"
+            )
+            apply_role(self._stop_all_button, "danger")
+            self._stop_all_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._stop_all_button.setToolTip(
+                "Cancel every running macro immediately (same as the stop hotkey)."
+            )
+            self._stop_all_button.clicked.connect(on_stop_all)
+            run_row.addWidget(self._stop_all_button)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
@@ -150,6 +170,11 @@ class MacrosTab(QWidget):
 
     def set_status(self, text: str) -> None:
         self._status.setText(text)
+
+    def set_stop_all_label(self, text: str) -> None:
+        """Update the STOP ALL button's caption (e.g. after a hotkey change)."""
+        if self._stop_all_button is not None:
+            self._stop_all_button.setText(text)
 
     # ------------------------------------------------------------------
     # Slots

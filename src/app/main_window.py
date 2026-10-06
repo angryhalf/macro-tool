@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QSizePolicy,
     QTabWidget,
     QVBoxLayout,
@@ -35,7 +34,7 @@ from core.macro_engine import MacroEngine
 from services.input import describe_hotkey
 from ui.macros_tab import MacrosTab
 from ui.settings_tab import SettingsTab
-from ui.theme import MODE_DARK, MODE_LIGHT, apply_role, set_mode
+from ui.theme import apply_role, set_mode
 
 logger = logging.getLogger(__name__)
 
@@ -68,53 +67,28 @@ class MainWindow(QMainWindow):
             self._run_macro,
             self._stop_macro,
             lambda: self._settings.stop_hotkey,
+            on_stop_all=self._stop_all,
             engine=self._macro_engine,
         )
         self.settings_tab = SettingsTab(self._on_global_settings_changed)
 
         # -- header bar ------------------------------------------------
-        self.stop_button = QPushButton(f"■  STOP ALL · {describe_hotkey(self._settings.stop_hotkey)}")
-        apply_role(self.stop_button, "danger")
-        self.stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.stop_button.setToolTip(
-            "Cancel every running macro immediately (same as the stop hotkey)."
-        )
-        self.stop_button.clicked.connect(self._stop_all)
-
-        title = QLabel("Macro Tool")
-        title.setObjectName("appTitle")
-        subtitle = QLabel("Screen-aware macros & trigger conditions")
-        subtitle.setObjectName("appSubtitle")
-        title_block = QVBoxLayout()
-        title_block.setSpacing(1)
-        title_block.addWidget(title)
-        title_block.addWidget(subtitle)
-
+        # No app title in the UI (the window title is enough); just the live
+        # status badge, right-aligned above the tabbed area.
         header = QHBoxLayout()
         header.setContentsMargins(2, 2, 2, 0)
-        header.addLayout(title_block)
         header.addStretch()
-
-        # Quick dark/light switch living in the header bar.
-        self.theme_toggle = QPushButton("Dark mode")
-        apply_role(self.theme_toggle, "ghost")
-        self.theme_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.theme_toggle.setToolTip("Switch between light and dark appearance.")
-        self.theme_toggle.clicked.connect(self._toggle_theme)
-        self._sync_theme_toggle()
 
         self._status_badge = QLabel("idle")
         apply_role(self._status_badge, "badge-muted")
         self._status_badge.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
-        header.addWidget(self.theme_toggle)
-        header.addSpacing(8)
         header.addWidget(self._status_badge)
-        header.addSpacing(8)
-        header.addWidget(self.stop_button)
 
+        # Tab buttons live in a left sidebar instead of across the top.
         tabs = QTabWidget()
+        tabs.setTabPosition(QTabWidget.TabPosition.West)
         tabs.addTab(self.macros_tab, "Macros")
         tabs.addTab(self.settings_tab, "Settings")
 
@@ -139,26 +113,6 @@ class MainWindow(QMainWindow):
         self._push_settings_to_ui()
         self._apply_to_engines()
         self._refresh_status()
-
-    # ------------------------------------------------------------------
-    # Theme
-    # ------------------------------------------------------------------
-    def _sync_theme_toggle(self) -> None:
-        """Keep the header toggle's label pointing at the *other* mode."""
-        dark = self._settings.theme_mode == MODE_DARK
-        self.theme_toggle.setText("Light mode" if dark else "Dark mode")
-
-    def _toggle_theme(self) -> None:
-        mode = MODE_LIGHT if self._settings.theme_mode == MODE_DARK else MODE_DARK
-        self._apply_theme(mode)
-
-    def _apply_theme(self, mode: str) -> None:
-        """Switch the app-wide palette and persist the choice."""
-        applied = set_mode(mode)
-        if applied != self._settings.theme_mode:
-            self._settings = replace(self._settings, theme_mode=applied)
-            self._save()
-        self._sync_theme_toggle()
 
     # ------------------------------------------------------------------
     # Settings plumbing
@@ -244,11 +198,10 @@ class MainWindow(QMainWindow):
         if pulled.theme_mode != self._settings.theme_mode:
             # The Appearance combo changed — restyle immediately.
             set_mode(pulled.theme_mode)
-            self._sync_theme_toggle()
         self._settings = pulled
         self._apply_to_engines()
         self._save()
-        self.stop_button.setText(
+        self.macros_tab.set_stop_all_label(
             f"■  STOP ALL · {describe_hotkey(self._settings.stop_hotkey)}"
         )
 

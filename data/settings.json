@@ -1,5 +1,7 @@
 {
+  "schema_version": 1,
   "macros": [],
-  "stop_hotkey": "f8",
-  "execution_delay_ms": 500
+  "stop_hotkey": "ctrl+q",
+  "execution_delay_ms": 500,
+  "theme_mode": "light"
 }

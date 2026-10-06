@@ -179,15 +179,6 @@ QLabel {{
 QLabel[hint="true"] {{
     color: {p.muted};
 }}
-QLabel#appTitle {{
-    font-size: 19px;
-    font-weight: 700;
-    letter-spacing: -0.2px;
-}}
-QLabel#appSubtitle {{
-    font-size: 12px;
-    color: {p.muted};
-}}
 QLabel[role^="badge"] {{
     border-radius: 9px;
     padding: 2px 10px;
@@ -379,20 +370,22 @@ QRadioButton::indicator:checked {{
     background: {p.surface};
 }}
 
-/* ---------------- tabs ---------------- */
+/* ---------------- tabs (sidebar style) ---------------- */
 QTabWidget::pane {{
     background: {p.surface};
     border: 1px solid {p.border};
     border-radius: {RADIUS};
-    top: -1px;
+}}
+QTabBar {{
+    background: transparent;
 }}
 QTabBar::tab {{
     background: transparent;
     border: 1px solid transparent;
-    border-bottom: 2px solid transparent;
-    border-radius: 8px 8px 0 0;
-    padding: 8px 18px;
-    margin-right: 4px;
+    border-left: 3px solid transparent;
+    border-radius: 8px;
+    padding: 10px 20px;
+    margin-bottom: 4px;
     color: {p.muted};
     font-weight: 600;
 }}
@@ -402,8 +395,8 @@ QTabBar::tab:hover {{
 }}
 QTabBar::tab:selected {{
     color: {p.accent};
-    border-bottom: 2px solid {p.accent};
-    background: {p.surface};
+    background: {p.selection};
+    border-left: 3px solid {p.accent};
 }}
 
 /* ---------------- tables ---------------- */
