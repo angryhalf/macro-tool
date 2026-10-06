@@ -101,6 +101,7 @@ class AppSettings:
     macros: tuple[MacroConfig, ...] = ()
     stop_hotkey: str = "f8"
     execution_delay_ms: int = 500  # countdown before a macro starts, to allow focusing the target window
+    theme_mode: str = "light"  # appearance: "light" or "dark"
 
 
 def _action_from_dict(raw: Any) -> ActionConfig:
@@ -215,6 +216,7 @@ def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> AppSettings:
             macros=tuple(_macro_from_dict(m) for m in raw_macros),
             stop_hotkey=str(raw.get("stop_hotkey", "f8")),
             execution_delay_ms=int(raw.get("execution_delay_ms", 500)),
+            theme_mode=str(raw.get("theme_mode", "light")),
         )
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return AppSettings()
@@ -228,6 +230,7 @@ def save_settings(settings: AppSettings, path: Path = DEFAULT_SETTINGS_PATH) -> 
         "macros": [_to_plain(m) for m in settings.macros],
         "stop_hotkey": settings.stop_hotkey,
         "execution_delay_ms": settings.execution_delay_ms,
+        "theme_mode": settings.theme_mode,
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 

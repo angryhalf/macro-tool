@@ -52,6 +52,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=Path("data/settings.json"),
         help="Path to the settings JSON file (default: data/settings.json)",
     )
+    parser.add_argument(
+        "--theme",
+        choices=("light", "dark"),
+        default=None,
+        help="Override the saved appearance for this session",
+    )
     parser.add_argument("--verbose", action="store_true", help="Also print logs to stderr")
     return parser.parse_args(argv)
 
@@ -66,6 +72,12 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication([sys.argv[0]])
     app.setApplicationName("Macro Tool")
     app.setOrganizationName("MacroTool")
+
+    # CLI override wins over whatever was persisted last time.
+    if args.theme:
+        from ui.theme import set_mode as _set_mode
+
+        _set_mode(args.theme, app)
     style_app(app)
 
     window = MainWindow(settings_path=args.settings)

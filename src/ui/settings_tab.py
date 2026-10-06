@@ -7,6 +7,7 @@ from dataclasses import replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QLabel,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.settings import AppSettings
+from ui.theme import MODE_DARK, MODE_LIGHT
 from ui.widgets import HotkeyButton
 
 
@@ -40,15 +42,22 @@ class SettingsTab(QWidget):
         self.start_delay.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.start_delay.valueChanged.connect(self._emit_changed)
 
+        self.theme_mode = QComboBox()
+        self.theme_mode.addItem("Light", MODE_LIGHT)
+        self.theme_mode.addItem("Dark", MODE_DARK)
+        self.theme_mode.setToolTip("Switch the whole interface between light and dark colours.")
+        self.theme_mode.currentIndexChanged.connect(self._emit_changed)
+
         group = QGroupBox("General")
         form = QFormLayout(group)
         form.setHorizontalSpacing(24)
         form.setVerticalSpacing(12)
         # Keep the compact controls left-aligned instead of stretching full width.
-        for widget in (self.stop_hotkey, self.start_delay):
+        for widget in (self.stop_hotkey, self.start_delay, self.theme_mode):
             widget.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         form.addRow("Emergency stop hotkey:", self.stop_hotkey)
         form.addRow("Macro start delay:", self.start_delay)
+        form.addRow("Appearance:", self.theme_mode)
         hint = QLabel(
             "The delay gives you time to focus the target window before a macro runs.  "
             "Changes here are saved automatically."
@@ -66,6 +75,8 @@ class SettingsTab(QWidget):
     def load(self, settings: AppSettings) -> None:
         self.stop_hotkey.hotkey = settings.stop_hotkey
         self.start_delay.setValue(settings.execution_delay_ms)
+        idx = self.theme_mode.findData(settings.theme_mode)
+        self.theme_mode.setCurrentIndex(idx if idx >= 0 else 0)
 
     def apply_to(self, settings: AppSettings) -> AppSettings:
         """Return a copy of *settings* with this tab's values applied."""
@@ -73,6 +84,7 @@ class SettingsTab(QWidget):
             settings,
             stop_hotkey=self.stop_hotkey.hotkey or "f8",
             execution_delay_ms=self.start_delay.value(),
+            theme_mode=self.theme_mode.currentData() or "light",
         )
 
     def _emit_changed(self) -> None:
