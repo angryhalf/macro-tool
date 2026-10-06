@@ -208,10 +208,24 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _refresh_status(self) -> None:
         running = sorted(self._macro_engine.running_macros())
-        if running:
-            self._set_status("running: " + ", ".join(running))
-        else:
+        if not running:
             self._set_status("idle")
+            return
+        # Enrich with session stats: loops completed and, crucially, which
+        # trigger rule is currently holding a macro's actions back -- the
+        # answer to "my macro looks like it's running but nothing happens".
+        parts = []
+        for name in running:
+            macro = next((m for m in self._settings.macros if m.name == name), None)
+            if macro is None:
+                parts.append(name)
+                continue
+            stats = self._macro_engine.macro_stats(macro)
+            detail = f"{name} ({stats['loops']} loops)"
+            if stats["blocked_by"]:
+                detail += f" — blocked by {stats['blocked_by']}"
+            parts.append(detail)
+        self._set_status("running: " + "; ".join(parts))
 
     def _set_status(self, text: str) -> None:
         self.statusBar().showMessage(text)

@@ -1134,6 +1134,8 @@ class MacroEditorDialog(QDialog):
         self._repeat.toggled.connect(self._loops.setDisabled)
         self._interval = QSpinBox(minimum=0, maximum=600_000, value=macro.interval_ms)
         self._interval.setSuffix(" ms")
+        self._enabled = QCheckBox("Enabled (unchecked macros ignore their hotkey and Run clicks)")
+        self._enabled.setChecked(macro.enabled)
 
         meta_form = QFormLayout()
         meta_form.addRow("Name:", self._name)
@@ -1141,6 +1143,7 @@ class MacroEditorDialog(QDialog):
         meta_form.addRow("Repeat:", self._repeat)
         meta_form.addRow("Loops:", self._loops)
         meta_form.addRow("Loop interval:", self._interval)
+        meta_form.addRow("", self._enabled)
         meta_box = QGroupBox("General")
         meta_box.setLayout(meta_form)
 
@@ -1292,4 +1295,5 @@ class MacroEditorDialog(QDialog):
             interval_ms=self._interval.value(),
             actions=tuple(self._actions),
             uid=self._uid,
+            enabled=self._enabled.isChecked(),
         )

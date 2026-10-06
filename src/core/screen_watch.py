@@ -99,23 +99,20 @@ def match_template(frame: np.ndarray, template: np.ndarray, confidence: float) -
 
 
 def region_change_score(previous: np.ndarray, current: np.ndarray) -> float:
-    """Mean absolute pixel difference between two same-size frames.
+    """Mean absolute grayscale pixel difference between two same-size frames.
 
-    Computed on a quarter-scale grayscale pair: ``cv2.mean`` over an absdiff
-    of full-color float32 frames allocates ~4x the frame size per poll and is
-    5-10x slower for identical threshold behaviour (change detection cares
-    about *that* pixels moved, not chroma precision).  Downscaling first also
-    smooths single-pixel dither noise.
+    Grayscale ``cv2.absdiff`` + ``cv2.mean`` replaces the original full-color
+    float32 version, which allocated ~4x the frame size per poll for
+    identical threshold behaviour (change detection cares *that* pixels
+    moved, not chroma precision).  No downscaling: quarter-scaling a large
+    region turned out to resize *up* and benchmark slower than plain
+    grayscale absdiff, and INTER_AREA averaging also dampens small-but-real
+    changes near the threshold.
     """
     if previous.shape != current.shape:
         return float("inf")
     prev_gray = cv2.cvtColor(previous, cv2.COLOR_BGR2GRAY)
     cur_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
-    scale = min(prev_gray.shape[0], prev_gray.shape[1]) / 256.0
-    if scale >= 4.0:
-        small = (max(1, int(prev_gray.shape[1] / scale * 4)), max(1, int(prev_gray.shape[0] / scale * 4)))
-        prev_gray = cv2.resize(prev_gray, small, interpolation=cv2.INTER_AREA)
-        cur_gray = cv2.resize(cur_gray, small, interpolation=cv2.INTER_AREA)
     diff = cv2.absdiff(prev_gray, cur_gray)
     return float(cv2.mean(diff)[0])
 

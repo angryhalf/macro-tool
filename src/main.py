@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import sys
 from pathlib import Path
 
@@ -22,9 +23,17 @@ LOG_PATH = Path("logs") / "macro.log"
 
 
 def configure_logging(verbose: bool) -> None:
-    """Write logs to file and (optionally) stderr."""
+    """Write logs to a rotating file and (optionally) stderr.
+
+    The engine logs every loop while macros run, so an unbounded file would
+    grow forever; 5 rotations of 1 MiB cap the damage.
+    """
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    handlers = [logging.FileHandler(LOG_PATH, encoding="utf-8")]
+    handlers: list[logging.Handler] = [
+        logging.handlers.RotatingFileHandler(
+            LOG_PATH, maxBytes=1_000_000, backupCount=5, encoding="utf-8"
+        )
+    ]
     if verbose:
         handlers.append(logging.StreamHandler(sys.stderr))
     logging.basicConfig(
@@ -50,7 +59,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     configure_logging(args.verbose)
 
-    app = QApplication(argv or sys.argv)
+    # Qt parses its own flags out of argv; our argparse options (--settings,
+    # --verbose) would make QApplication warn or choke, so hand it only the
+    # program name.
+    app = QApplication([sys.argv[0]])
     app.setApplicationName("Macro Tool")
 
     window = MainWindow(settings_path=args.settings)
