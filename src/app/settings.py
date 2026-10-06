@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid as _uuid
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from app.conditions import ScreenCondition
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_SETTINGS_PATH = Path("data") / "settings.json"
+
+#: Bumped whenever the on-disk document layout changes; written by
+#: ``save_settings`` so future loaders can migrate deliberately instead of
+#: guessing from missing fields.
+SETTINGS_SCHEMA_VERSION = 1
 
 
 def new_macro_uid() -> str:
@@ -36,7 +44,7 @@ class ActionConfig:
 
     kind: str = "key"  # key | hold_key | combo | type | move | click | double_click
     #                    mouse_down | mouse_up | drag | scroll | wait
-    #                    wait_for | stop_trigger | start_trigger
+    #                    wait_for | stop_trigger | start_trigger | if_else
     key: str = ""  # for key/hold_key actions (e.g. "a", "space", "f1")
     button: str = "left"  # for click/double_click/mouse_down/mouse_up/drag actions
     x: int | None = None  # absolute screen X (mouse actions; drag start)
@@ -45,11 +53,17 @@ class ActionConfig:
     duration_ms: int = 50  # hold time; wait delay; drag end Y
     combo: str = ""  # for combo actions, e.g. "ctrl+shift+d"
     text: str = ""  # for type actions, the literal string to type
-    condition: ScreenCondition | None = None  # for wait_for/stop-trigger/start-trigger actions
+    condition: ScreenCondition | None = None  # for wait_for/stop-trigger/start-trigger/if-else actions
+    #: ``if_else`` only: sub-sequence executed when ``condition`` holds.
+    then_actions: tuple["ActionConfig", ...] = ()
+    #: ``if_else`` only: sub-sequence executed when ``condition`` does not hold.
+    else_actions: tuple["ActionConfig", ...] = ()
 
 
 #: Action kinds that gate execution on a screen condition.
-CONDITION_ACTION_KINDS: frozenset[str] = frozenset({"wait_for", "stop_trigger", "start_trigger"})
+CONDITION_ACTION_KINDS: frozenset[str] = frozenset(
+    {"wait_for", "stop_trigger", "start_trigger", "if_else"}
+)
 
 
 @dataclass(frozen=True)
@@ -74,6 +88,10 @@ class MacroConfig:
     #: Stable identity across renames.  Never displayed; lets the window
     #: detect real renames instead of guessing from name-set differences.
     uid: str = ""
+    #: Disabled macros keep their hotkey registered-free: pressing it (or
+    #: clicking Run) does nothing until re-enabled.  Lets users park a
+    #: misbehaving macro without deleting it or losing its configuration.
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -89,9 +107,27 @@ def _action_from_dict(raw: Any) -> ActionConfig:
     if not isinstance(raw, dict):
         return ActionConfig()
 
-    known = {k: v for k, v in raw.items() if k in ActionConfig.__dataclass_fields__ and k != "condition"}
+    known = {
+        k: v
+        for k, v in raw.items()
+        if k in ActionConfig.__dataclass_fields__ and k not in ("condition", "then_actions", "else_actions")
+    }
     condition = _condition_from_dict(raw.get("condition"))
-    return ActionConfig(condition=condition, **known)
+    # ``if_else`` carries nested sub-sequences; one level of nesting is the
+    # supported depth (an if_else inside then/else is dropped with a warning).
+    branches: dict[str, tuple[ActionConfig, ...]] = {}
+    for field in ("then_actions", "else_actions"):
+        items = raw.get(field, [])
+        built: list[ActionConfig] = []
+        if isinstance(items, list):
+            for item in items:
+                child = _action_from_dict(item)
+                if child.kind == "if_else":
+                    logger.warning("Nested if_else ignored (max depth 1)")
+                    continue
+                built.append(child)
+        branches[field] = tuple(built)
+    return ActionConfig(condition=condition, **known, **branches)
 
 
 def _condition_from_dict(raw: Any) -> ScreenCondition | None:
@@ -105,6 +141,14 @@ def _condition_from_dict(raw: Any) -> ScreenCondition | None:
             known["region"] = tuple(region)
         else:
             known.pop("region", None)
+    if "all_regions" in known:
+        extra = known["all_regions"]
+        cleaned = []
+        if isinstance(extra, (list, tuple)):
+            for rect in extra:
+                if isinstance(rect, (list, tuple)) and len(rect) == 4:
+                    cleaned.append(tuple(int(v) for v in rect))
+        known["all_regions"] = tuple(cleaned)
     return ScreenCondition(**known)
 
 
@@ -180,11 +224,73 @@ def save_settings(settings: AppSettings, path: Path = DEFAULT_SETTINGS_PATH) -> 
     """Persist settings as pretty-printed JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "schema_version": SETTINGS_SCHEMA_VERSION,
         "macros": [_to_plain(m) for m in settings.macros],
         "stop_hotkey": settings.stop_hotkey,
         "execution_delay_ms": settings.execution_delay_ms,
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+#: Extensions accepted by the single-macro import feature.
+MACRO_FILE_EXTENSIONS: tuple[str, ...] = (".json", ".macro")
+
+
+def _looks_like_macro(raw: Any) -> bool:
+    return isinstance(raw, dict) and ("actions" in raw or "name" in raw)
+
+
+def save_macro_json(macro: MacroConfig, path: Path) -> None:
+    """Write exactly one macro to *path* (self-contained, human-readable)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"kind": "macro", "schema_version": SETTINGS_SCHEMA_VERSION, **_to_plain(macro)}
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def load_macro_json(path: Path) -> MacroConfig:
+    """Read a single macro from *path*.
+
+    Accepts files written by :func:`save_macro_json` as well as any JSON
+    object that looks like a macro (``{"name": ..., "actions": [...]}``) --
+    including whole-settings documents, from which the first macro is taken.
+    Raises ``ValueError`` when the file holds no usable macro.
+    """
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        macros = raw.get("macros")
+        if isinstance(macros, list) and macros and isinstance(macros[0], dict):
+            return _macro_from_dict(macros[0])
+        if _looks_like_macro(raw):
+            return _macro_from_dict(raw)
+    raise ValueError(f"{path} does not contain a macro")
+
+
+def import_macro_files(paths: list[Path], existing: Sequence[MacroConfig]) -> list[MacroConfig]:
+    """Load one or more macro files into fresh, collision-free configs.
+
+    Names are de-duplicated against *existing* (``"X"`` -> ``"X (imported)"``
+    -> ``"X (imported 2)"``...), uids are always regenerated so imports never
+    impersonate an already-known macro, and every imported macro starts
+    disabled with its hotkey cleared -- importing must not silently steal a
+    hotkey the user already assigned elsewhere.
+    """
+    taken_names = {m.name for m in existing}
+    imported: list[MacroConfig] = []
+    for path in paths:
+        macro = load_macro_json(path)
+        name = macro.name.strip() or "Imported macro"
+        if name in taken_names:
+            candidate = f"{name} (imported)"
+            counter = 2
+            while candidate in taken_names:
+                candidate = f"{name} (imported {counter})"
+                counter += 1
+            name = candidate
+        taken_names.add(name)
+        imported.append(
+            replace(macro, name=name, uid=new_macro_uid(), start_hotkey="", enabled=False)
+        )
+    return imported
 
 
 def _to_plain(obj: Any) -> Any:

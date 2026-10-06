@@ -21,7 +21,7 @@ import threading
 import time
 from collections.abc import Callable
 from app.conditions import ConditionRuntime, ScreenCondition
-from app.settings import ActionConfig, AppSettings, MacroConfig
+from app.settings import ActionConfig, AppSettings, CONDITION_ACTION_KINDS, MacroConfig
 from services.input import HotkeyManager, perform_action
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,8 @@ class ExecutionToken:
     themselves never halt, so a later ``start_trigger`` can re-arm the tail.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, macro: MacroConfig | None = None) -> None:
+        self.macro = macro  # identity (name/uid) for stats reporting; may be None
         self._cancelled = threading.Event()
         self._blocked = threading.Event()  # set => later actions are triggered off
         # Guards ``blocked_rules``: the worker thread and the background
@@ -93,6 +94,23 @@ class ExecutionToken:
         self._cancelled.wait(seconds)
 
 
+class MacroStats:
+    """Mutable per-macro session counters for debuggability.
+
+    The engine's failure mode is a macro that *silently stops firing* (a
+    trigger rule holding everything back), so each run records which rule
+    last blocked it and how many loops completed.  Read via
+    :meth:`MacroEngine.macro_stats`; guarded by the engine lock.
+    """
+
+    __slots__ = ("loops", "blocked_by", "last_event")
+
+    def __init__(self) -> None:
+        self.loops = 0
+        self.blocked_by: str | None = None
+        self.last_event: str = ""
+
+
 class MacroEngine:
     """Runs macros and ad-hoc action lists in background threads."""
 
@@ -100,6 +118,9 @@ class MacroEngine:
         self._lock = threading.Lock()
         self._tokens: set[ExecutionToken] = set()
         self._macro_tokens: dict[str, ExecutionToken] = {}
+        # Per-macro session counters (loops completed, last block reason);
+        # keyed by uid so renames while running do not orphan the stats.
+        self._stats: dict[str, MacroStats] = {}
         self._hotkeys = HotkeyManager()
         self._settings = AppSettings()
         self._monitor_started = False
@@ -127,11 +148,13 @@ class MacroEngine:
             self._sync_hotkeys(settings)
 
     def _sync_hotkeys(self, settings: AppSettings) -> None:
-        """Re-register all global hotkeys (stop key + one per macro)."""
+        """Re-register all global hotkeys (stop key + one per *enabled* macro)."""
         bindings: list[tuple[str, object]] = [(settings.stop_hotkey, self.stop_all)]
 
         seen: set[str] = {settings.stop_hotkey.strip().lower()}
         for macro in settings.macros:
+            if not macro.enabled:
+                continue  # disabled macros never claim their hotkey
             key = macro.start_hotkey.strip().lower()
             if not key:
                 continue
@@ -148,7 +171,7 @@ class MacroEngine:
 
         def launch() -> None:
             macro = next((m for m in self._settings.macros if m.name == macro_name), None)
-            if macro is None:
+            if macro is None or not macro.enabled:
                 return
             delay_s = self._settings.execution_delay_ms / 1000.0
             self.start_macro(macro, initial_delay_s=delay_s)
@@ -171,6 +194,9 @@ class MacroEngine:
         if not macro.actions:
             logger.info("Macro '%s' has no actions", macro.name)
             return None
+        if not macro.enabled:
+            logger.info("Macro '%s' is disabled; ignoring start request", macro.name)
+            return None
         for action in macro.actions:
             if action.kind in ("wait_for", "stop_trigger", "start_trigger") and (
                 action.condition is None or not action.condition.configured
@@ -182,7 +208,7 @@ class MacroEngine:
         # main-window constructor started it, leaving hotkey-triggered macros in
         # headless/embedded setups blocked forever.
         self.start_monitor()
-        token = ExecutionToken()
+        token = ExecutionToken(macro)
         thread = threading.Thread(
             target=self._run_macro,
             args=(macro, token, initial_delay_s),
@@ -196,6 +222,9 @@ class MacroEngine:
                 return existing
             self._tokens.add(token)
             self._macro_tokens[macro.name] = token
+            stats = MacroStats()
+            stats.last_event = "started"
+            self._stats[macro.uid or macro.name] = stats
         # Wake the (possibly parked) monitor thread so it starts watching this
         # macro's rules without waiting for its bounded idle timeout.
         self._work_available.set()
@@ -253,6 +282,44 @@ class MacroEngine:
     def is_macro_running(self, name: str) -> bool:
         return name in self.running_macros()
 
+    def macro_stats(self, macro: MacroConfig) -> dict[str, object]:
+        """Session counters for *macro*'s current-or-last run (UI/debug aid).
+
+        Returns ``{"running": bool, "loops": int, "blocked_by": str|None,
+        "last_event": str}`` -- or all-zero defaults if the macro never ran
+        since launch.  ``blocked_by`` names the trigger rule that currently
+        holds the macro's actions back; it is the answer to "why did my
+        macro silently stop firing?".
+        """
+        key = macro.uid or macro.name
+        with self._lock:
+            stats = self._stats.get(key)
+            if stats is None:
+                return {"running": False, "loops": 0, "blocked_by": None, "last_event": ""}
+            running = any(
+                token.macro is not None
+                and (token.macro.uid or token.macro.name) == key
+                and token in self._tokens
+                and not token.cancelled
+                for token in self._tokens
+            )
+            return {
+                "running": running,
+                "loops": stats.loops,
+                "blocked_by": stats.blocked_by,
+                "last_event": stats.last_event,
+            }
+
+    def _record_block_reason(self, token: ExecutionToken, reason: str | None) -> None:
+        """Store which rule currently blocks *token* (engine-lock protected)."""
+        macro = token.macro
+        if macro is None:
+            return
+        with self._lock:
+            stats = self._stats.get(macro.uid or macro.name)
+            if stats is not None:
+                stats.blocked_by = reason
+
     def _finish(self, token: ExecutionToken, macro_name: str | None = None) -> None:
         with self._lock:
             self._tokens.discard(token)
@@ -282,12 +349,17 @@ class MacroEngine:
                 if not self._run_actions(macro.actions, token):
                     break
                 loops += 1
+                with self._lock:  # session stat for the UI's status line
+                    stats = self._stats.get(macro.uid or macro.name)
+                    if stats is not None:
+                        stats.loops = loops
                 # Loop boundary: whatever trigger rules are left armed from
                 # the last pass no longer apply to the next one -- start it
                 # with every action triggered on.
                 with token.rules_lock:
                     token.blocked_rules = []
                 token.refresh_block()
+                self._record_block_reason(token, None)
                 if not macro.repeat and loops >= max(1, macro.loops):
                     break
                 if token.cancelled:
@@ -308,8 +380,11 @@ class MacroEngine:
         A ``stop_trigger`` with a rule arms it (later actions held while the
         rule is on screen); a ``start_trigger`` with a rule holds later
         actions until the rule appears once.  Bare markers hold/release the
-        stretch between them.  Flow steps never block themselves -- normal
-        actions call :meth:`ExecutionToken.wait_while_blocked` before firing.
+        stretch between them.  An ``if_else`` samples its rule once right
+        here and runs only the matching branch (nested branches may not
+        contain further flow steps -- see :func:`_validate_branch`).  Flow
+        steps never block themselves -- normal actions call
+        :meth:`ExecutionToken.wait_while_blocked` before firing.
         """
         index = 0
         total = len(actions)
@@ -322,6 +397,9 @@ class MacroEngine:
             has_rule = condition is not None and condition.configured
             if kind == "wait_for":
                 if not self._await_condition(condition, token):
+                    return False
+            elif kind == "if_else":
+                if not self._run_if_else(action, token):
                     return False
             elif kind == "stop_trigger":
                 # Trigger this step's rule(s) off for everything after it.
@@ -387,13 +465,71 @@ class MacroEngine:
             index += 1
         return True
 
-    @staticmethod
-    def _sync_triggers(token: ExecutionToken) -> None:
+    def _run_if_else(self, action: ActionConfig, token: ExecutionToken) -> bool:
+        """Evaluate one ``if_else`` branch step; False ends the macro pass.
+
+        The rule is sampled *once* (unlike stop/start-trigger rules, nothing
+        stays armed): the matching branch's plain actions then run through
+        the normal gated path, so trigger rules still hold them back while
+        their conditions say so.  An unconfigured rule takes the else branch
+        -- a broken "is X on screen?" test must not silently run the "yes"
+        side.
+        """
+        condition = action.condition
+        matched = condition is not None and condition.configured and self._evaluate_once(condition)
+        branch = action.then_actions if matched else action.else_actions
+        logger.info(
+            "If-else (%s): %d action(s)", "matched" if matched else "not matched", len(branch)
+        )
+        for child in branch:
+            if child.kind in CONDITION_ACTION_KINDS:
+                logger.warning(
+                    "Nested flow action %r inside if_else branch ignored", child.kind
+                )
+                continue
+            if token.cancelled:
+                return False
+            token.wait_while_blocked()
+            if token.cancelled:
+                return False
+            perform_action(child, cancel=lambda: token.cancelled or token.gated)
+        return True
+
+    def _sync_triggers(self, token: ExecutionToken) -> None:
         """Reflect the *current* screen state of the armed rules right away."""
+        self._apply_rule_states(token)
+        token.refresh_block()
+        self._record_token_block(token)
+
+    def _apply_rule_states(self, token: ExecutionToken) -> None:
+        """Re-evaluate every armed rule and store its blocking state."""
         with token.rules_lock:
             for entry in token.blocked_rules:
-                entry["_blocking"] = MacroEngine._rule_blocks_now(entry)
-        token.refresh_block()
+                entry["_blocking"] = self._rule_blocks_now(entry)
+
+    @staticmethod
+    def _first_blocking_reason(token: ExecutionToken) -> str | None:
+        """Human-readable name of the rule currently holding actions back."""
+        with token.rules_lock:
+            for entry in token.blocked_rules:
+                if not entry.get("_blocking"):
+                    continue
+                condition = entry.get("condition")
+                mode = entry.get("mode", "?")
+                return condition.description if condition is not None else f"{mode} hold"
+        return None
+
+    def _record_token_block(self, token: ExecutionToken) -> None:
+        """Publish the rule that currently blocks *token* into its stats.
+
+        ``_record_block_reason`` re-acquires the engine lock, so this must run
+        *outside* ``token.rules_lock`` (lock ordering: the engine lock is
+        never held while taking a token's rules lock).
+        """
+        if token.macro is None:
+            return
+        reason = self._first_blocking_reason(token)
+        self._record_block_reason(token, reason)
 
     @staticmethod
     def _evaluate_once(condition: ScreenCondition) -> bool:
@@ -508,8 +644,7 @@ class MacroEngine:
             return False
         return True
 
-    @staticmethod
-    def _monitor_token(token: ExecutionToken) -> bool:
+    def _monitor_token(self, token: ExecutionToken) -> bool:
         """Re-evaluate one macro's armed rules; True when triggers flipped.
 
         This is the automatic screen watching: every rule a running macro's
@@ -524,11 +659,14 @@ class MacroEngine:
                 token.refresh_block()
                 return was_blocked
             for entry in token.blocked_rules:
-                entry["_blocking"] = MacroEngine._rule_blocks_now(entry)
+                entry["_blocking"] = self._rule_blocks_now(entry)
             token.blocked_rules = [e for e in token.blocked_rules if not e.get("disarm")]
         before = token.gated
         token.refresh_block()
         now = token.gated
+        # Keep the UI's "blocked_by" stat current even when the overall
+        # gated flag did not flip (e.g. rule A released, rule B took over).
+        self._record_token_block(token)
         if before != now:
             if now:
                 logger.info("Actions triggered off by screen rule")

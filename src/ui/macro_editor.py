@@ -37,9 +37,11 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QSpinBox,
     QStackedWidget,
+    QListWidgetItem,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -52,6 +54,7 @@ from services.input import (
     InputRecorder,
     current_mouse_position,
     describe_hotkey,
+    is_modifier_name,
     sort_combo,
 )
 from ui.condition_editor import ConditionEditor
@@ -75,7 +78,29 @@ ACTION_KINDS: dict[str, str] = {
     "Wait until (screen)": "wait_for",
     "Stop trigger (screen)": "stop_trigger",
     "Start trigger (screen)": "start_trigger",
+    "If / else (screen)": "if_else",
 }
+
+#: Action kinds that gate execution on a screen rule (kept in sync with the
+#: engine's ``CONDITION_ACTION_KINDS``).
+_FLOW_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_trigger", "if_else")
+
+#: Kinds whose page is the shared condition editor and which store their
+#: screen rule in ``ActionConfig.condition``.
+_CONDITION_PAGE_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_trigger", "if_else")
+
+
+def _branch_editor(kind_label: str) -> tuple[QListWidget, QHBoxLayout]:
+    """Build one *If* / *Else* branch list widget plus its add/remove row."""
+    box = QListWidget()
+    box.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+    add = QPushButton(f"Add step to {kind_label}")
+    remove = QPushButton("Remove selected")
+    row = QHBoxLayout()
+    row.addWidget(add)
+    row.addWidget(remove)
+    row.addStretch()
+    return box, row
 
 BUTTONS = ["left", "right", "middle"]
 
@@ -97,6 +122,12 @@ _CONDITION_HINTS: dict[str, str] = {
         "Triggers on every action written after this step as soon as this "
         "screen event appears; until then those actions stay held.  Without "
         "a rule it simply releases the hold opened by the last 'Stop trigger'."
+    ),
+    "if_else": (
+        "Samples the screen rule once right here and runs only the matching "
+        "branch below -- 'If' when the rule is on screen, 'Else' otherwise. "
+        "Branches hold plain keyboard/mouse steps only (no nested flow "
+        "actions).  An unconfigured rule takes the Else branch."
     ),
 }
 
@@ -167,14 +198,16 @@ class ActionEditorDialog(QDialog):
         self._add_page("drag", self._build_drag_page(action))
         self._add_page("scroll", self._build_scroll_page(action))
         self._add_page("wait", self._build_wait_page(action))
-        # All three flow-control kinds share the single condition page above;
+        # All flow-control kinds share the single condition page above;
         # it is registered for each kind so the stacked widget can show it.
-        for kind in ("wait_for", "stop_trigger", "start_trigger"):
+        for kind in _CONDITION_PAGE_KINDS:
             self._add_page(kind, self._condition_page)
         # The dict keeps its original (per-kind editor) contract: every kind
         # maps to the same shared editor instance.
-        for kind in ("wait_for", "stop_trigger", "start_trigger"):
+        for kind in _CONDITION_PAGE_KINDS:
             self._condition_editors[kind] = self._shared_condition
+        # ``if_else`` additionally gets branch editors appended to that page.
+        self._if_else_box = self._build_if_else_branches(action)
 
         self._kind.currentIndexChanged.connect(self._show_page)
 
@@ -366,10 +399,95 @@ class ActionEditorDialog(QDialog):
         # Seed defaults from the action being edited (its own condition plus
         # the wait_for give-up timeout stored in duration_ms).
         editor.load(action.condition if action.condition is not None else ScreenCondition(template_path=""))
-        editor.timeout_spin.setValue(max(0, min(editor.timeout_spin.maximum(), action.duration_ms)))
+        if action.kind == "wait_for":
+            editor.timeout_spin.setValue(
+                max(0, min(editor.timeout_spin.maximum(), action.duration_ms))
+            )
         self._shared_condition = editor
         layout.addWidget(editor)
         return page, editor
+
+    def _build_if_else_branches(self, action: ActionConfig) -> QWidget:
+        """If/Else branch editors appended to the shared condition page.
+
+        Each branch is a plain list of keyboard/mouse steps edited through
+        :class:`ActionEditorDialog` itself (nesting one level deep is the
+        supported maximum -- nested flow actions are refused on input).
+        The whole box is only visible for the ``if_else`` kind.
+        """
+        box = QWidget()
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(0, 4, 0, 0)
+        self._branch_lists: dict[str, QListWidget] = {}
+        for field, label in (("then_actions", "If"), ("else_actions", "Else")):
+            outer.addWidget(QLabel(f"<b>{label} branch</b>"))
+            list_box, button_row = _branch_editor(label)
+            add_button = button_row.itemAt(0).widget()
+            remove_button = button_row.itemAt(1).widget()
+            add_button.clicked.connect(lambda _=False, f=field: self._edit_branch_step(f, None))
+            remove_button.clicked.connect(
+                lambda _=False, lb=list_box: self._remove_branch_step(lb)
+            )
+            outer.addWidget(list_box)
+            outer.addLayout(button_row)
+            self._branch_lists[field] = list_box
+            for child in getattr(action, field):
+                self._append_branch_item(list_box, child)
+        box.setVisible(False)
+        return box
+
+    def _append_branch_item(self, list_box: QListWidget, child: ActionConfig) -> None:
+        name, details = MacroEditorDialog.describe(child)
+        item = QListWidgetItem(f"{name}: {details}")
+        # Keep the model object on the item so order survives edits.
+        item.setData(Qt.ItemDataRole.UserRole, child)
+        list_box.addItem(item)
+
+    def _edit_branch_step(self, field: str, existing: ActionConfig | None) -> None:
+        """Open an :class:`ActionEditorDialog` for one branch step (in place)."""
+        list_box = self._branch_lists[field]
+        dialog = ActionEditorDialog(existing or ActionConfig(), parent=self)
+        if not dialog.exec():
+            return
+        new_action = dialog.action()
+        if new_action.kind in CONDITION_ACTION_KINDS:
+            # Nested flow actions inside a branch are unsupported; silently
+            # drop them at the UI boundary instead of writing bad data.
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(
+                self,
+                "Not allowed",
+                "Branch steps must be plain keyboard/mouse actions; "
+                "flow-control actions cannot nest inside If/Else.",
+            )
+            return
+        if existing is None:
+            self._append_branch_item(list_box, new_action)
+            return
+        row = list_box.currentRow()
+        if row >= 0:
+            item = list_box.takeItem(row)
+            del item
+            fresh = QListWidgetItem()
+            name, details = MacroEditorDialog.describe(new_action)
+            fresh.setText(f"{name}: {details}")
+            fresh.setData(Qt.ItemDataRole.UserRole, new_action)
+            list_box.insertItem(row, fresh)
+
+    @staticmethod
+    def _remove_branch_step(list_box: QListWidget) -> None:
+        row = list_box.currentRow()
+        if row >= 0:
+            list_box.takeItem(row)
+
+    def _branch_actions(self, field: str) -> tuple[ActionConfig, ...]:
+        list_box = self._branch_lists[field]
+        return tuple(
+            list_box.item(row).data(Qt.ItemDataRole.UserRole)
+            for row in range(list_box.count())
+            if list_box.item(row).data(Qt.ItemDataRole.UserRole) is not None
+        )
 
     @staticmethod
     def _position_spins(action: ActionConfig) -> tuple[QSpinBox, QSpinBox]:
@@ -385,6 +503,7 @@ class ActionEditorDialog(QDialog):
         if kind in _CONDITION_HINTS:  # a flow-control action
             self._condition_hint.setText(_CONDITION_HINTS[kind])
             self._shared_condition.set_timeout_visible(kind == "wait_for")
+            self._if_else_box.setVisible(kind == "if_else")
         page = self._page_for_kind.get(kind)
         if page is not None:
             self._pages.setCurrentWidget(page)
@@ -645,10 +764,19 @@ class ActionEditorDialog(QDialog):
             condition = editor.build() if editor is not None else None
             duration_ms = 0
             if condition is not None and not condition.configured:
+                # Unconfigured rule: store None, but *keep* the user's other
+                # inputs (branches below) rather than silently discarding them.
                 condition = None
             elif kind == "wait_for" and condition is not None:
                 # Give-up timeout lives on the action's duration_ms field.
                 duration_ms = condition.timeout_ms
+            if kind == "if_else":
+                return ActionConfig(
+                    kind=kind,
+                    condition=condition,
+                    then_actions=self._branch_actions("then_actions"),
+                    else_actions=self._branch_actions("else_actions"),
+                )
             return ActionConfig(kind=kind, condition=condition, duration_ms=duration_ms)
         return ActionConfig(kind=kind)
 
@@ -668,7 +796,8 @@ def _events_to_actions(events: list[tuple[float, str, dict]]) -> list[ActionConf
     * key press+release <= 250 ms apart -> Press key; longer -> Hold key.
     * consecutive mouse moves are thinned to the last position of each burst.
     * button press/release pairs shorter than 300 ms with little movement
-      become Click; otherwise Mouse down + Move + Mouse up.
+      become Click; otherwise a single **Drag** step (start = press point,
+      end = release point) -- one semantic action instead of three raw ones.
     * idle gaps between events become Wait steps (rounded to 10 ms).
     """
     actions: list[ActionConfig] = []
@@ -739,9 +868,21 @@ def _events_to_actions(events: list[tuple[float, str, dict]]) -> list[ActionConf
             if held_ms <= 300 and moved <= 5:
                 actions.append(ActionConfig(kind="click", button=button))
             else:
-                actions.append(ActionConfig(kind="mouse_down", button=button))
-                actions.append(ActionConfig(kind="move", x=payload["x"], y=payload["y"]))
-                actions.append(ActionConfig(kind="mouse_up", button=button))
+                # A press/release pair with travel is a drag gesture: emit one
+                # semantic ``drag`` step (start -> end) instead of the raw
+                # mouse_down/move/mouse_up triple, which replays brittlely.
+                # NOTE: drag reuses amount/duration_ms for the end point --
+                # see ActionConfig's field-overloading warning in app.settings.
+                actions.append(
+                    ActionConfig(
+                        kind="drag",
+                        button=button,
+                        x=pair[1]["x"],
+                        y=pair[1]["y"],
+                        amount=payload["x"],
+                        duration_ms=payload["y"],
+                    )
+                )
             pending_wait = 0.0
             continue
 
@@ -1072,6 +1213,11 @@ class MacroEditorDialog(QDialog):
             "wait_for": ("Wait until", cond),
             "stop_trigger": ("Stop trigger", cond),
             "start_trigger": ("Start trigger", cond),
+            "if_else": (
+                "If / else",
+                f"{cond}  →  if: {len(action.then_actions)} step(s), "
+                f"else: {len(action.else_actions)} step(s)",
+            ),
         }
         return labels.get(action.kind, (action.kind, ""))
 
@@ -1082,7 +1228,9 @@ class MacroEditorDialog(QDialog):
         if condition is None or not condition.configured:
             return "no rule configured"
         parts = [condition.description]
-        if action.duration_ms:
+        # The give-up timeout only means something for wait_for; drag steps
+        # reuse duration_ms as the end Y coordinate and must not be mislabeled.
+        if action.duration_ms and action.kind == "wait_for":
             parts.append(f"gives up after {action.duration_ms} ms")
         return ", ".join(part for part in parts if part) or "rule configured"
 
