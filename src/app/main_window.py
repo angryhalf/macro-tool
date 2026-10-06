@@ -11,13 +11,14 @@ import logging
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStatusBar,
     QTabWidget,
     QVBoxLayout,
@@ -35,6 +36,7 @@ from core.macro_engine import MacroEngine
 from services.input import describe_hotkey
 from ui.macros_tab import MacrosTab
 from ui.settings_tab import SettingsTab
+from ui.theme import apply_role
 
 logger = logging.getLogger(__name__)
 
@@ -71,29 +73,51 @@ class MainWindow(QMainWindow):
         )
         self.settings_tab = SettingsTab(self._on_global_settings_changed)
 
+        # -- header bar ------------------------------------------------
+        self.stop_button = QPushButton(f"■  STOP ALL · {describe_hotkey(self._settings.stop_hotkey)}")
+        apply_role(self.stop_button, "danger")
+        self.stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stop_button.setToolTip(
+            "Cancel every running macro immediately (same as the stop hotkey)."
+        )
+        self.stop_button.clicked.connect(self._stop_all)
+
+        title = QLabel("Macro Tool")
+        title.setObjectName("appTitle")
+        subtitle = QLabel("Screen-aware macros & trigger conditions")
+        subtitle.setObjectName("appSubtitle")
+        title_block = QVBoxLayout()
+        title_block.setSpacing(1)
+        title_block.addWidget(title)
+        title_block.addWidget(subtitle)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(2, 2, 2, 0)
+        header.addLayout(title_block)
+        header.addStretch()
+        self._status_badge = QLabel("idle")
+        apply_role(self._status_badge, "badge-muted")
+        self._status_badge.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        header.addWidget(self._status_badge)
+        header.addSpacing(8)
+        header.addWidget(self.stop_button)
+
         tabs = QTabWidget()
         tabs.addTab(self.macros_tab, "Macros")
         tabs.addTab(self.settings_tab, "Settings")
 
-        # -- top bar ---------------------------------------------------
-        self.stop_button = QPushButton(f"■ STOP ALL ({describe_hotkey(self._settings.stop_hotkey)})")
-        self.stop_button.setStyleSheet(
-            "background-color:#c0392b; color:white; font-weight:bold; padding:6px;"
-        )
-        self.stop_button.clicked.connect(self._stop_all)
-        title = QLabel("<b>Macro Tool</b>")
-        top_row = QHBoxLayout()
-        top_row.addWidget(title)
-        top_row.addStretch()
-        top_row.addWidget(self.stop_button)
-
-        # -- status bar ------------------------------------------------
+        # -- central layout --------------------------------------------
         central = QWidget()
+        central.setObjectName("pageRoot")
         layout = QVBoxLayout(central)
-        layout.addLayout(top_row)
+        layout.setContentsMargins(16, 12, 16, 0)
+        layout.setSpacing(10)
+        layout.addLayout(header)
         layout.addWidget(tabs)
         self.setStatusBar(QStatusBar())
-        layout.setContentsMargins(8, 8, 8, 0)
+        self.statusBar().showMessage("idle")
         self.setCentralWidget(central)
 
         # -- initial state ---------------------------------------------
@@ -185,7 +209,9 @@ class MainWindow(QMainWindow):
         self._pull_global_settings()
         self._apply_to_engines()
         self._save()
-        self.stop_button.setText(f"■ STOP ALL ({describe_hotkey(self._settings.stop_hotkey)})")
+        self.stop_button.setText(
+            f"■  STOP ALL · {describe_hotkey(self._settings.stop_hotkey)}"
+        )
 
     def _pull_global_settings(self) -> None:
         """Copy the settings-tab widgets into the settings document."""
@@ -229,3 +255,9 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, text: str) -> None:
         self.statusBar().showMessage(text)
+        # Mirror a compact version of the state in the header badge.
+        running = text.startswith("running:") or text.startswith("Running")
+        self._status_badge.setText(f"● {text}" if running else text)
+        apply_role(self._status_badge, "badge-running" if running else "badge-muted")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)

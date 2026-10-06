@@ -13,6 +13,7 @@ import logging
 import time
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -67,10 +68,12 @@ class ConditionEditor(QWidget):
         self.mode_combo.currentIndexChanged.connect(self._update_visibility)
 
         self.template_label = QLabel("No template selected")
-        self.template_label.setStyleSheet("color: gray;")
+        self.template_label.setProperty("hint", "true")
         self.capture_button = QPushButton("Capture region from screen…")
+        self.capture_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.capture_button.clicked.connect(self._capture_template)
         self.load_button = QPushButton("Load file…")
+        self.load_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.load_button.clicked.connect(self._load_file)
         template_row = QHBoxLayout()
         template_row.addWidget(self.capture_button)

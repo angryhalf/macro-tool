@@ -18,6 +18,7 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from app.main_window import MainWindow
+from ui.theme import style_app
 
 LOG_PATH = Path("logs") / "macro.log"
 
@@ -64,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     # program name.
     app = QApplication([sys.argv[0]])
     app.setApplicationName("Macro Tool")
+    app.setOrganizationName("MacroTool")
+    style_app(app)
 
     window = MainWindow(settings_path=args.settings)
     window.show()

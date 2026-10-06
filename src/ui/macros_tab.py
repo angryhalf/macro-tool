@@ -17,9 +17,10 @@ from pathlib import Path
 
 from dataclasses import replace
 
-from PySide6.QtGui import QBrush
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
+    QFrame,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -38,6 +39,7 @@ from app.settings import (
     save_macro_json,
 )
 from ui.macro_editor import MacroEditorDialog
+from ui.theme import MUTED, apply_role
 
 logger = logging.getLogger(__name__)
 
@@ -77,41 +79,57 @@ class MacrosTab(QWidget):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         for column in range(1, 5):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+        header.setHighlightSections(False)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setShowGrid(False)
+        self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setFrameShape(QFrame.Shape.NoFrame)
+        self._table.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
         self._table.doubleClicked.connect(self._edit_selected)
         self._table.itemChanged.connect(self._on_item_changed)
 
         toolbar = QHBoxLayout()
-        for text, slot in (
-            ("Add macro", self._add_macro),
-            ("Edit macro", self._edit_selected),
-            ("Duplicate", self._duplicate_selected),
-            ("Remove", self._remove_selected),
-            ("Export…", self._export_selected),
-            ("Import…", self._import_macros),
+        toolbar.setSpacing(8)
+        for text, slot, role in (
+            ("＋  Add macro", self._add_macro, "primary"),
+            ("✎  Edit", self._edit_selected, ""),
+            ("⧉  Duplicate", self._duplicate_selected, ""),
+            ("🗑  Remove", self._remove_selected, ""),
+            ("↗  Export…", self._export_selected, ""),
+            ("↙  Import…", self._import_macros, ""),
         ):
             button = QPushButton(text)
+            if role:
+                apply_role(button, role)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(slot)
             toolbar.addWidget(button)
         toolbar.addStretch()
 
         run_row = QHBoxLayout()
-        self._run_button = QPushButton("▶ Run selected macro")
+        run_row.setSpacing(8)
+        self._run_button = QPushButton("▶  Run selected macro")
+        apply_role(self._run_button, "success")
+        self._run_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._run_button.clicked.connect(self._run_selected)
-        self._stop_button = QPushButton("■ Stop selected macro")
-        self._stop_button.setStyleSheet(
-            "background-color:#c0392b; color:white; font-weight:bold;"
-        )
+        self._stop_button = QPushButton("■  Stop selected macro")
+        apply_role(self._stop_button, "danger")
+        self._stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._stop_button.clicked.connect(self._stop_selected)
         self._status = QLabel("")
+        self._status.setProperty("hint", "true")
         run_row.addWidget(self._run_button)
         run_row.addWidget(self._stop_button)
+        run_row.addSpacing(6)
         run_row.addWidget(self._status)
         run_row.addStretch()
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
         layout.addLayout(toolbar)
         layout.addWidget(self._table)
         layout.addLayout(run_row)
@@ -294,7 +312,7 @@ class MacrosTab(QWidget):
         self._commit()
 
     def _refresh_run_state(self) -> None:
-        """Mark running macros with ▶ and disabled ones grayed + labeled."""
+        """Mark running macros with ▶ and gray out disabled ones."""
         if self._engine is None:
             return
         running = set(self._engine.running_macros())
@@ -303,11 +321,15 @@ class MacrosTab(QWidget):
             item = self._table.item(row, 1)  # name column (0 is the checkbox)
             if item is None:
                 continue
-            prefix = "▶ " if macro.name in running else ""
-            suffix = "" if macro.enabled else "  (disabled)"
+            prefix = "▶  " if macro.name in running else ""
+            suffix = "" if macro.enabled else "   ·  disabled"
             item.setText(f"{prefix}{macro.name}{suffix}")
-            color = Qt.GlobalColor.black if macro.enabled else Qt.GlobalColor.gray
-            item.setForeground(QBrush(color))
+            if macro.name in running:
+                item.setForeground(QBrush(QColor("#30a46c")))
+            elif macro.enabled:
+                item.setForeground(QBrush(QColor("#1c2333")))
+            else:
+                item.setForeground(QBrush(QColor(MUTED)))
 
     def _poll_run_state(self) -> None:
         """Timer tick: only touch the table when the run set actually changed.

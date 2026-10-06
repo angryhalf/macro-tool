@@ -58,6 +58,7 @@ from services.input import (
     sort_combo,
 )
 from ui.condition_editor import ConditionEditor
+from ui.theme import apply_role
 from ui.widgets import HotkeyButton
 
 #: Human label -> action kind understood by ``services.input.perform_action``
@@ -233,7 +234,7 @@ class ActionEditorDialog(QDialog):
     @staticmethod
     def _hint(text: str) -> QLabel:
         label = QLabel(text)
-        label.setStyleSheet("color: gray;")
+        label.setProperty("hint", "true")
         label.setWordWrap(True)
         return label
 
@@ -393,7 +394,7 @@ class ActionEditorDialog(QDialog):
         layout = QVBoxLayout(page)
         self._condition_hint = QLabel(_CONDITION_HINTS["wait_for"])
         self._condition_hint.setWordWrap(True)
-        self._condition_hint.setStyleSheet("color: gray;")
+        self._condition_hint.setProperty("hint", "true")
         layout.addWidget(self._condition_hint)
         editor = ConditionEditor(show_timeout=True)
         # Seed defaults from the action being edited (its own condition plus
@@ -926,6 +927,7 @@ class MacroRecorderDialog(QDialog):
 
         self._status = QLabel("Press Start, perform your inputs, then press the stop hotkey.")
         self._status.setWordWrap(True)
+        self._status.setProperty("hint", "true")
         self._count_label = QLabel("0 events")
 
         self._table = QTableWidget(0, 3)
@@ -965,12 +967,18 @@ class MacroRecorderDialog(QDialog):
     def _toggle(self) -> None:
         self._stop() if self.recording else self._start()
 
+    def _set_record_button(self, recording: bool) -> None:
+        self._record_button.setText("■  Stop recording" if recording else "●  Start recording")
+        apply_role(self._record_button, "danger" if recording else "success")
+        self._record_button.style().unpolish(self._record_button)
+        self._record_button.style().polish(self._record_button)
+
     def _start(self) -> None:
         with self._lock:
             self._events.clear()
         self._pressed_keys.clear()
         self._started_at = time.monotonic()
-        self._record_button.setText("■ Stop recording")
+        self._set_record_button(True)
         self._status.setText(
             f"Recording… press the stop hotkey ({describe_hotkey(self._stop_hotkey)}) when done."
         )
@@ -990,7 +998,7 @@ class MacroRecorderDialog(QDialog):
             self._recorder = None
         self._pressed_keys.clear()
         self._refresh_timer.stop()
-        self._record_button.setText("● Start recording")
+        self._set_record_button(False)
         if self._status.text().startswith("Recording"):
             self._status.setText("Recording stopped.")
         self._refresh_table()
@@ -1157,18 +1165,22 @@ class MacroEditorDialog(QDialog):
         self._table.doubleClicked.connect(self._edit_action)
 
         toolbar = QHBoxLayout()
+        toolbar.setSpacing(8)
         for text, slot in (
-            ("Add", self._add_action),
-            ("Edit", self._edit_action),
-            ("Remove", self._remove_action),
-            ("Up", lambda: self._move(-1)),
-            ("Down", lambda: self._move(+1)),
+            ("＋ Add", self._add_action),
+            ("✎ Edit", self._edit_action),
+            ("🗑 Remove", self._remove_action),
+            ("↑ Up", lambda: self._move(-1)),
+            ("↓ Down", lambda: self._move(+1)),
         ):
             button = QPushButton(text)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(slot)
             toolbar.addWidget(button)
         toolbar.addStretch()
-        record_button = QPushButton("🎥 Record inputs…")
+        record_button = QPushButton("🎥  Record inputs…")
+        apply_role(record_button, "primary")
+        record_button.setCursor(Qt.CursorShape.PointingHandCursor)
         record_button.clicked.connect(self._record_inputs)
         toolbar.addWidget(record_button)
 

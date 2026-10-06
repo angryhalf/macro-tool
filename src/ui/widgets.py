@@ -84,6 +84,9 @@ class HotkeyButton(QPushButton):
 
     def _toggle_capture(self) -> None:
         self._capturing = self.isChecked()
+        self.setProperty("hotkeyCapturing", "true" if self._capturing else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
         if self._capturing:
             self.setText("Press keys…")
         else:

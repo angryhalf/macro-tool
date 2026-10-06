@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QLabel,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -26,19 +28,37 @@ class SettingsTab(QWidget):
         self._on_changed = on_changed
 
         self.stop_hotkey = HotkeyButton("f8")
+        self.stop_hotkey.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stop_hotkey.setToolTip(
+            "Click, then press the key combination that stops every running macro."
+        )
         self.stop_hotkey.hotkey_changed.connect(self._emit_changed)
 
         self.start_delay = QSpinBox(minimum=0, maximum=10_000, singleStep=100, value=500)
         self.start_delay.setSuffix(" ms")
+        self.start_delay.setButtonSymbols(QSpinBox.ButtonSymbols.PlusMinus)
+        self.start_delay.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.start_delay.valueChanged.connect(self._emit_changed)
 
         group = QGroupBox("General")
         form = QFormLayout(group)
+        form.setHorizontalSpacing(24)
+        form.setVerticalSpacing(12)
+        # Keep the compact controls left-aligned instead of stretching full width.
+        for widget in (self.stop_hotkey, self.start_delay):
+            widget.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         form.addRow("Emergency stop hotkey:", self.stop_hotkey)
         form.addRow("Macro start delay:", self.start_delay)
-        form.addRow(QLabel("The delay gives you time to focus the target window before a macro runs."))
+        hint = QLabel(
+            "The delay gives you time to focus the target window before a macro runs.  "
+            "Changes here are saved automatically."
+        )
+        hint.setProperty("hint", "true")
+        hint.setWordWrap(True)
+        form.addRow("", hint)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
         layout.addWidget(group)
         layout.addStretch()
 
