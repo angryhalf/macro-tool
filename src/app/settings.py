@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid as _uuid
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
@@ -101,6 +102,21 @@ class AppSettings:
     macros: tuple[MacroConfig, ...] = ()
     stop_hotkey: str = "f8"
     execution_delay_ms: int = 500  # countdown before a macro starts, to allow focusing the target window
+    #: UI colour scheme: "light" or "dark" (see :mod:`app.theme`).
+    theme: str = "light"
+    #: Accent colour used by the theme (selections, active nav, primary buttons).
+    accent_color: str = "#3d7bfd"
+
+
+#: Fallback accent colour when the stored one is missing or malformed.
+DEFAULT_ACCENT_COLOR = "#3d7bfd"
+
+
+def _validated_accent(value: Any) -> str:
+    """Return *value* if it looks like a ``#rrggbb`` colour, else the default."""
+    if isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        return value.lower()
+    return DEFAULT_ACCENT_COLOR
 
 
 def _action_from_dict(raw: Any) -> ActionConfig:
@@ -215,6 +231,8 @@ def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> AppSettings:
             macros=tuple(_macro_from_dict(m) for m in raw_macros),
             stop_hotkey=str(raw.get("stop_hotkey", "f8")),
             execution_delay_ms=int(raw.get("execution_delay_ms", 500)),
+            theme=str(raw.get("theme", "light")),
+            accent_color=_validated_accent(raw.get("accent_color")),
         )
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return AppSettings()
@@ -228,6 +246,8 @@ def save_settings(settings: AppSettings, path: Path = DEFAULT_SETTINGS_PATH) -> 
         "macros": [_to_plain(m) for m in settings.macros],
         "stop_hotkey": settings.stop_hotkey,
         "execution_delay_ms": settings.execution_delay_ms,
+        "theme": settings.theme,
+        "accent_color": settings.accent_color,
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 

@@ -1,8 +1,14 @@
-"""The single application window: tabs for macros and settings.
+"""The single application window: a sidebar switches between pages.
+
+Pages (Macros / Settings) are swapped in a ``QStackedWidget`` driven by
+flat sidebar buttons -- the old ``QTabWidget`` row is gone.  The sidebar
+also carries the app title and the emergency-stop button, and the whole
+window is themed light/dark from the settings document (see
+:mod:`app.theme`).
 
 Stop-trigger/start-trigger screen conditions are set *inside* each macro's action list;
 the macro engine's background monitor watches the screen for them
-automatically while a macro runs -- no separate watcher tab is needed.
+automatically while a macro runs -- no separate watcher page is needed.
 """
 
 from __future__ import annotations
@@ -13,13 +19,15 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QApplication,
+    QStackedWidget,
     QStatusBar,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -31,6 +39,7 @@ from app.settings import (
     rename_in_settings,
     save_settings,
 )
+from app.theme import STOP_BUTTON_QSS, build_stylesheet, get_theme, sidebar_button_qss
 from core.macro_engine import MacroEngine
 from services.input import describe_hotkey
 from ui.macros_tab import MacrosTab
@@ -40,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """Owns the settings document and wires the tabs to the engines."""
+    """Owns the settings document and wires the pages to the engines."""
 
     # Engine threads may only touch the GUI through these signals.
     engine_state_changed = Signal()
@@ -53,7 +62,7 @@ class MainWindow(QMainWindow):
         )
 
         self.setWindowTitle("Macro Tool")
-        self.resize(900, 640)
+        self.resize(980, 660)
 
         # -- engines ---------------------------------------------------
         self._macro_engine = MacroEngine()
@@ -61,7 +70,7 @@ class MainWindow(QMainWindow):
 
         self.engine_state_changed.connect(self._refresh_status)
 
-        # -- tabs ------------------------------------------------------
+        # -- pages -------------------------------------------------------
         self.macros_tab = MacrosTab(
             self._on_macros_changed,
             self._run_macro,
@@ -71,32 +80,60 @@ class MainWindow(QMainWindow):
         )
         self.settings_tab = SettingsTab(self._on_global_settings_changed)
 
-        tabs = QTabWidget()
-        tabs.addTab(self.macros_tab, "Macros")
-        tabs.addTab(self.settings_tab, "Settings")
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self.macros_tab)
+        self._stack.addWidget(self.settings_tab)
 
-        # -- top bar ---------------------------------------------------
+        # -- sidebar ------------------------------------------------------
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+
+        brand = QLabel("Macro Tool")
+        brand.setObjectName("brand")
+        subtitle = QLabel("screen-aware automation")
+        subtitle.setObjectName("subtitle")
+
+        nav_macros = self._make_nav_button("≡   Macros", 0)
+        nav_settings = self._make_nav_button("⚙   Settings", 1)
+        self._nav_group.idClicked.connect(self._stack.setCurrentIndex)
+
         self.stop_button = QPushButton(f"■ STOP ALL ({describe_hotkey(self._settings.stop_hotkey)})")
-        self.stop_button.setStyleSheet(
-            "background-color:#c0392b; color:white; font-weight:bold; padding:6px;"
-        )
+        self.stop_button.setStyleSheet(STOP_BUTTON_QSS)
         self.stop_button.clicked.connect(self._stop_all)
-        title = QLabel("<b>Macro Tool</b>")
-        top_row = QHBoxLayout()
-        top_row.addWidget(title)
-        top_row.addStretch()
-        top_row.addWidget(self.stop_button)
 
-        # -- status bar ------------------------------------------------
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(200)
+        side_layout = QVBoxLayout(sidebar)
+        side_layout.setContentsMargins(0, 18, 0, 14)
+        side_layout.setSpacing(2)
+        side_layout.addWidget(brand)
+        side_layout.addWidget(subtitle)
+        side_layout.addSpacing(14)
+        side_layout.addWidget(nav_macros)
+        side_layout.addWidget(nav_settings)
+        side_layout.addStretch()
+        side_layout.addWidget(self.stop_button)
+
         central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.addLayout(top_row)
-        layout.addWidget(tabs)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(sidebar)
+        page_host = QWidget()
+        page_host.setObjectName("pageHost")
+        page_layout = QVBoxLayout(page_host)
+        page_layout.setContentsMargins(16, 16, 16, 16)
+        page_layout.addWidget(self._stack)
+        root.addWidget(page_host, stretch=1)
+
         self.setStatusBar(QStatusBar())
-        layout.setContentsMargins(8, 8, 8, 0)
         self.setCentralWidget(central)
 
         # -- initial state ---------------------------------------------
+        nav_macros.setChecked(True)
+        self._stack.setCurrentIndex(0)
+        self._apply_theme()
         # The monitor thread watches the screen for any stop-trigger/start-trigger
         # conditions inside running macros.  It is also started lazily by
         # ``start_macro``; starting it here keeps hotkeys that target rules warm
@@ -105,6 +142,44 @@ class MainWindow(QMainWindow):
         self._push_settings_to_ui()
         self._apply_to_engines()
         self._refresh_status()
+
+    # ------------------------------------------------------------------
+    # Sidebar / chrome
+    # ------------------------------------------------------------------
+    def _make_nav_button(self, text: str, page_index: int) -> QPushButton:
+        """A flat, checkable sidebar button that shows *page_index* on click."""
+        button = QPushButton(text)
+        button.setObjectName("navButton")
+        button.setCheckable(True)
+        self._nav_group.addButton(button, page_index)
+        return button
+
+    def _apply_theme(self) -> None:
+        """Re-tone the whole window (global sheet + sidebar chrome) live."""
+        t = get_theme(self._settings.theme, self._settings.accent_color)
+        # Nav buttons and the sidebar paint per-theme QSS because their
+        # checked-state / background colours vary with the palette.
+        for button in self._nav_group.buttons():
+            button.setStyleSheet(sidebar_button_qss(t))
+        sidebar = self.findChild(QWidget, "sidebar")
+        if sidebar is not None:
+            sidebar.setStyleSheet(
+                f"""
+                #sidebar {{ background-color: {t.sidebar}; border-right: 1px solid {t.border}; }}
+                #sidebar QLabel#brand {{
+                    font-size: 17px; font-weight: bold; color: {t.text};
+                    padding: 0 16px; background: transparent;
+                }}
+                #sidebar QLabel#subtitle {{
+                    font-size: 11px; color: {t.muted};
+                    padding: 0 16px; background: transparent;
+                }}
+                """
+            )
+        # The rest of the UI follows the application-wide stylesheet.
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(build_stylesheet(t))
 
     # ------------------------------------------------------------------
     # Settings plumbing
@@ -184,6 +259,7 @@ class MainWindow(QMainWindow):
     def _on_global_settings_changed(self) -> None:
         self._pull_global_settings()
         self._apply_to_engines()
+        self._apply_theme()  # theme/accent changes must show up instantly
         self._save()
         self.stop_button.setText(f"■ STOP ALL ({describe_hotkey(self._settings.stop_hotkey)})")
 
