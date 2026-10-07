@@ -1,1 +1,10 @@
-(empty)
+# Python compiled files
+__pycache__/
+*.pyc
+
+# Environment and secrets
+.env
+.env.*
+
+# Logs and temp files
+*.log

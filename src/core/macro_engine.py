@@ -1,17 +1,24 @@
 """Core macro execution engine.
 
-:class:`MacroEngine` runs action sequences on worker threads with looping,
-hotkey starts and an emergency stop callable from any thread.  A macro is
-only ever *running* or *stopped* (no paused state); gating is expressed by
-ordinary actions:
+:class:`MacroEngine` runs action sequences on worker threads with hotkey
+starts and an emergency stop callable from any thread.  A macro is only ever
+*running* or *stopped* (no paused state); both triggering and looping are
+expressed by ordinary actions:
 
-* ``wait_for`` -- block until its screen condition holds (optional timeout).
-* ``stop_trigger <rule>`` -- hold later actions while the rule is on screen.
-* ``start_trigger <rule>`` -- keep later actions held until the rule appears.
+* ``wait_for`` -- block until its condition holds (optional timeout).
+* ``stop_trigger <rule>`` -- hold later actions while the rule is true.
+* ``start_trigger <rule>`` -- keep later actions held until the rule becomes
+  true.  Together the two steps work like an if/else over the stretch of
+  actions written between them.
+* ``loop_start`` / ``loop_end`` -- jump back/forward pair that repeats the
+  steps between them (iteration count on the start step, delay on the end
+  step) instead of a general per-macro loop option.
 
-A bare marker (no rule) acts as a plain hold/release pair.  The background
-monitor polls armed rules automatically; flow steps never halt themselves --
-normal actions call :meth:`ExecutionToken.wait_while_blocked` before firing.
+Rules watch three kinds of sources: the screen (polled by the background
+monitor), physical user input (keyboard/mouse events recorded live) and
+other actions executing inside the same run.  Flow steps never halt
+themselves -- normal actions call :meth:`ExecutionToken.wait_while_blocked`
+before firing.
 """
 
 from __future__ import annotations
@@ -21,8 +28,8 @@ import threading
 import time
 from collections.abc import Callable
 from app.conditions import ConditionRuntime, ScreenCondition
-from app.settings import ActionConfig, AppSettings, CONDITION_ACTION_KINDS, MacroConfig
-from services.input import HotkeyManager, perform_action
+from app.settings import ActionConfig, AppSettings, MacroConfig
+from services.input import HotkeyManager, InputRecorder, perform_action
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +37,12 @@ logger = logging.getLogger(__name__)
 class ExecutionToken:
     """Per-run bookkeeping for one running sequence.
 
-    Holds cooperative **cancellation** (user/emergency stop) plus the armed
-    trigger rules from the ``stop_trigger``/``start_trigger`` steps reached so
-    far.  Each entry in :attr:`blocked_rules` has a ``mode``:
+    Holds cooperative **cancellation** (user/emergency stop), the armed
+    trigger rules from the ``stop_trigger``/``start_trigger`` steps reached
+    so far, and the event counters backing non-screen conditions.  Each entry
+    in :attr:`blocked_rules` has a ``mode``:
 
-    * ``"while"`` -- block later actions while the rule holds on screen.
+    * ``"while"`` -- block later actions while the rule holds.
     * ``"until"`` -- block until the rule holds once, then self-disarm.
     * ``"hold"``  -- bare marker: block until a bare ``start_trigger`` removes it.
 
@@ -54,6 +62,26 @@ class ExecutionToken:
         # Rules armed by the ``stop_trigger``/``start_trigger`` steps reached so far.
         # Each entry: {"mode": "while"|"until"|"hold", "condition": ...}
         self.blocked_rules: list[dict] = []
+        #: Monotonic per-run counters keyed by ``action:<kind>`` /
+        #: ``key:<name>`` / ``mouse:<button>`` / ``wheel``.  Incremented by
+        #: the worker when an action executes and by the input watcher when
+        #: the user physically performs an input; the monitor compares each
+        #: non-screen rule's stored baseline against the current value to
+        #: decide whether the event happened since the rule was armed.
+        self.event_counts: dict[str, int] = {}
+        self._events_lock = threading.Lock()
+        #: Set while at least one running token watches user-input events so
+        #: the engine keeps exactly one global listener alive.
+        self.needs_input_watch = False
+
+    def bump_event(self, key: str) -> None:
+        """Record that the event *key* (e.g. ``"key:a"``) just happened."""
+        with self._events_lock:
+            self.event_counts[key] = self.event_counts.get(key, 0) + 1
+
+    def event_count(self, key: str) -> int:
+        with self._events_lock:
+            return self.event_counts.get(key, 0)
 
     # -- cancellation --------------------------------------------------
     def cancel(self) -> None:
@@ -130,6 +158,9 @@ class MacroEngine:
         # Woken whenever a macro starts/stops so the monitor can park in the
         # idle case instead of busy-looping at 50 ms forever.
         self._work_available = threading.Event()
+        # One shared global input listener, started on demand while any
+        # running token watches user-input conditions (see _sync_input_watch).
+        self._input_recorder: InputRecorder | None = None
         self.on_state_changed: Callable[[], None] | None = None  # called after start/stop events
 
     # ------------------------------------------------------------------
@@ -265,6 +296,9 @@ class MacroEngine:
         # Wake the monitor thread so it observes cancellation and exits
         # instead of lingering in a parked wait until process teardown.
         self._work_available.set()
+        if self._input_recorder is not None:
+            self._input_recorder.stop()
+            self._input_recorder = None
         self._hotkeys.stop()
 
     # ------------------------------------------------------------------
@@ -325,7 +359,89 @@ class MacroEngine:
             self._tokens.discard(token)
             if macro_name is not None and self._macro_tokens.get(macro_name) is token:
                 del self._macro_tokens[macro_name]
+        # The last run watching user input may have ended -- drop the global
+        # listener so we never keep recording keys nobody waits for.
+        self._sync_input_watch()
         self._notify()
+
+    # ------------------------------------------------------------------
+    # User-input watch (physical key/mouse events feed input-source rules)
+    # ------------------------------------------------------------------
+    def _token_needs_input_watch(self, token: ExecutionToken) -> bool:
+        """True when *token* has armed rules that watch physical user input."""
+        with token.rules_lock:
+            for entry in token.blocked_rules:
+                condition = entry.get("condition")
+                if condition is not None and condition.source == "input":
+                    return True
+        return False
+
+    def _any_token_needs_input_watch(self) -> bool:
+        with self._lock:
+            tokens = list(self._tokens)
+        return any(
+            not t.cancelled and self._token_needs_input_watch(t) for t in tokens
+        )
+
+    def _sync_input_watch(self) -> None:
+        """Start/stop the single shared InputRecorder to match demand.
+
+        Called whenever trigger rules are armed/disarmed and when runs end;
+        keeps exactly one global keyboard/mouse listener alive while at least
+        one running macro waits on a user-input event.
+        """
+        needed = self._any_token_needs_input_watch()
+        recorder = self._input_recorder
+        if needed and (recorder is None or not recorder.running):
+            if recorder is None:
+                recorder = InputRecorder(
+                    on_press=self._on_user_key,
+                    on_button_press=self._on_user_button,
+                    on_scroll=self._on_user_scroll,
+                )
+                self._input_recorder = recorder
+            try:
+                recorder.start()
+            except Exception:  # pragma: no cover - platform without listeners
+                logger.exception("Could not start the user-input watcher")
+        elif not needed and recorder is not None and recorder.running:
+            recorder.stop()
+
+    def _bump_matching_tokens(self, event: str) -> None:
+        """Record *event* (``key:<name>`` / ``mouse:<button>`` / ``wheel``).
+
+        Bumps the per-run counter only on tokens that currently have an armed
+        input rule waiting for exactly this event, so unrelated keystrokes
+        never influence any macro.
+        """
+        with self._lock:
+            tokens = list(self._tokens)
+        touched = False
+        for token in tokens:
+            if token.cancelled:
+                continue
+            with token.rules_lock:
+                watched = any(
+                    entry.get("condition") is not None
+                    and entry["condition"].source == "input"
+                    and entry["condition"].event == event
+                    for entry in token.blocked_rules
+                )
+            if watched:
+                token.bump_event(event)
+                touched = True
+        if touched:
+            self._work_available.set()  # let the monitor react immediately
+
+    def _on_user_key(self, name: str) -> None:
+        self._bump_matching_tokens(f"key:{name}")
+
+    def _on_user_button(self, button: str) -> None:
+        self._bump_matching_tokens(f"mouse:{button}")
+
+    def _on_user_scroll(self, amount: int) -> None:
+        del amount  # any scroll counts as the "wheel" event
+        self._bump_matching_tokens("wheel")
 
     def _notify(self) -> None:
         if self.on_state_changed:
@@ -344,30 +460,14 @@ class MacroEngine:
             if initial_delay_s > 0:
                 logger.info("Macro '%s' starts in %.1fs", macro.name, initial_delay_s)
                 token.wait(initial_delay_s)
-            loops = 0
-            while not token.cancelled:
-                if not self._run_actions(macro.actions, token):
-                    break
-                loops += 1
-                with self._lock:  # session stat for the UI's status line
-                    stats = self._stats.get(macro.uid or macro.name)
-                    if stats is not None:
-                        stats.loops = loops
-                # Loop boundary: whatever trigger rules are left armed from
-                # the last pass no longer apply to the next one -- start it
-                # with every action triggered on.
-                with token.rules_lock:
-                    token.blocked_rules = []
-                token.refresh_block()
-                self._record_block_reason(token, None)
-                if not macro.repeat and loops >= max(1, macro.loops):
-                    break
-                if token.cancelled:
-                    break
-                if macro.interval_ms > 0:
-                    token.wait(macro.interval_ms / 1000.0)
+            # Looping is an *action*, not a general macro option: exactly one
+            # pass over the action list runs, and any ``loop_start`` /
+            # ``loop_end`` pair inside it repeats the steps between them.
+            # (Legacy repeat/loops/interval_ms values were folded into a
+            # matching loop pair at load time -- see app.settings.)
+            self._run_actions(macro.actions, token)
             if not token.cancelled:
-                logger.info("Macro '%s' finished (%d loop)", macro.name, loops)
+                logger.info("Macro '%s' finished", macro.name)
         except Exception:  # pragma: no cover - defensive logging
             logger.exception("Macro '%s' crashed", macro.name)
         finally:
@@ -378,14 +478,15 @@ class MacroEngine:
         """Execute one pass of *actions*; False when the pass ended early.
 
         A ``stop_trigger`` with a rule arms it (later actions held while the
-        rule is on screen); a ``start_trigger`` with a rule holds later
-        actions until the rule appears once.  Bare markers hold/release the
-        stretch between them.  An ``if_else`` samples its rule once right
-        here and runs only the matching branch (nested branches may not
-        contain further flow steps -- see :func:`_validate_branch`).  Flow
-        steps never block themselves -- normal actions call
-        :meth:`ExecutionToken.wait_while_blocked` before firing.
+        rule holds); a ``start_trigger`` with a rule holds later actions
+        until the rule fires once -- together they gate the stretch between
+        them like an if/else.  Rules can watch the screen, physical user
+        input or other actions executing.  Bare markers hold/release the
+        stretch between them.  ``loop_start``/``loop_end`` repeat the steps
+        between them.  Flow steps never block themselves -- normal actions
+        call :meth:`ExecutionToken.wait_while_blocked` before firing.
         """
+        loop_frames, gated = self._match_loop_markers(actions)
         index = 0
         total = len(actions)
         while index < total:
@@ -395,23 +496,57 @@ class MacroEngine:
             kind = action.kind
             condition = action.condition
             has_rule = condition is not None and condition.configured
+            if kind in ("loop_start", "loop_end") or index in gated:
+                # Normal action: fires only while no trigger rule holds it back.
+                token.wait_while_blocked()
+                if token.cancelled:
+                    return False
             if kind == "wait_for":
                 if not self._await_condition(condition, token):
                     return False
-            elif kind == "if_else":
-                if not self._run_if_else(action, token):
-                    return False
+            elif kind == "loop_end":
+                # Reached from inside the loop body (or a stray marker).
+                entry = self._top_loop_frame(loop_frames, index)
+                if entry is None:
+                    logger.warning("Unmatched loop_end at step %d/%d; ignoring", index + 1, total)
+                    index += 1
+                    continue
+                entry["completed"] = entry.get("completed", 0) + 1
+                iterations = entry["iterations"]
+                if iterations and entry["completed"] >= iterations:
+                    logger.info(
+                        "Loop %d/%d completed at step %d/%d, falling through",
+                        entry["completed"], iterations, index + 1, total,
+                    )
+                    if token.macro is not None:
+                        with self._lock:
+                            stats = self._stats.get(token.macro.uid or token.macro.name)
+                            if stats is not None:
+                                stats.loops = entry["completed"]
+                    index += 1  # exhausted: leave the loop, run on past it
+                else:
+                    if action.duration_ms > 0:
+                        token.wait(action.duration_ms / 1000.0)
+                    if token.cancelled:
+                        return False
+                    index = entry["start"] + 1  # jump back into the loop body
+                continue
+            elif kind == "loop_start":
+                # Marker only: the frame was pre-paired in ``stack``; the
+                # body between this step and its loop_end just runs on.
+                pass
             elif kind == "stop_trigger":
                 # Trigger this step's rule(s) off for everything after it.
                 with token.rules_lock:
                     if has_rule:
                         assert condition is not None
                         token.blocked_rules.append(
-                            {"mode": "while", "condition": condition, "_runtime": None, "_blocking": False}
+                            {"mode": "while", "condition": condition, "_runtime": None,
+                             "_blocking": False, "_token": token}
                         )
                         message = (
                             "Stop trigger armed at step %d/%d: actions after this point are "
-                            "triggered off while '%s' is on screen"
+                            "triggered off while '%s' holds"
                         )
                         args: tuple = (index + 1, total, condition.description)
                     else:
@@ -427,9 +562,9 @@ class MacroEngine:
                 self._sync_triggers(token)
             elif kind == "start_trigger":
                 if has_rule:
-                    # Trigger on only after this rule appears once on screen.
+                    # Trigger on only after this rule fires once.
                     assert condition is not None
-                    if self._evaluate_once(condition):
+                    if self._condition_holds_once(condition, token):
                         logger.info(
                             "Start-trigger condition already met at step %d/%d: actions "
                             "after this point run freely",
@@ -438,11 +573,12 @@ class MacroEngine:
                     else:
                         with token.rules_lock:
                             token.blocked_rules.append(
-                                {"mode": "until", "condition": condition, "_runtime": None, "_blocking": True}
+                                {"mode": "until", "condition": condition, "_runtime": None,
+                                 "_blocking": True, "_token": token}
                             )
                         logger.info(
                             "Start trigger armed at step %d/%d: actions after this point "
-                            "stay triggered off until '%s' is on screen",
+                            "stay triggered off until '%s' fires",
                             index + 1, total, condition.description,
                         )
                 else:
@@ -462,44 +598,76 @@ class MacroEngine:
                 # typing runs, waits) abort promptly instead of blocking the
                 # emergency stop for their full duration.
                 perform_action(action, cancel=lambda: token.cancelled or token.gated)
+                # Record the execution so ``action:<kind>`` rules armed by
+                # stop/start triggers can react to it.
+                token.bump_event(f"action:{kind}")
             index += 1
         return True
 
-    def _run_if_else(self, action: ActionConfig, token: ExecutionToken) -> bool:
-        """Evaluate one ``if_else`` branch step; False ends the macro pass.
+    @staticmethod
+    def _match_loop_markers(actions: tuple[ActionConfig, ...]) -> list[dict]:
+        """Pre-pair every ``loop_start`` with its matching ``loop_end``.
 
-        The rule is sampled *once* (unlike stop/start-trigger rules, nothing
-        stays armed): the matching branch's plain actions then run through
-        the normal gated path, so trigger rules still hold them back while
-        their conditions say so.  An unconfigured rule takes the else branch
-        -- a broken "is X on screen?" test must not silently run the "yes"
-        side.
+        Returns a stack of loop frames (outermost first) plus a sentinel
+        frame covering the whole list; :meth:`_pop_loop_frame` peels the
+        innermost frame whose body contains the current index.  Unpaired
+        markers degrade gracefully (a stray ``loop_end`` is ignored, a stray
+        ``loop_start`` simply runs as a no-op marker).
         """
-        condition = action.condition
-        matched = condition is not None and condition.configured and self._evaluate_once(condition)
-        branch = action.then_actions if matched else action.else_actions
-        logger.info(
-            "If-else (%s): %d action(s)", "matched" if matched else "not matched", len(branch)
-        )
-        for child in branch:
-            if child.kind in CONDITION_ACTION_KINDS:
-                logger.warning(
-                    "Nested flow action %r inside if_else branch ignored", child.kind
-                )
-                continue
-            if token.cancelled:
-                return False
-            token.wait_while_blocked()
-            if token.cancelled:
-                return False
-            perform_action(child, cancel=lambda: token.cancelled or token.gated)
-        return True
+        pending: list[int] = []
+        pairs: dict[int, int] = {}
+        for i, action in enumerate(actions):
+            if action.kind == "loop_start":
+                pending.append(i)
+            elif action.kind == "loop_end" and pending:
+                pairs[pending.pop()] = i
+        sentinel = {"start": -1, "end": len(actions), "iterations": 0}
+        stack = [sentinel]
+        # Push outermost-first so popping at runtime yields innermost first.
+        for start in sorted(pairs):
+            iterations = max(0, actions[start].amount)
+            stack.append({"start": start, "end": pairs[start], "iterations": iterations})
+        return stack
+
+    @staticmethod
+    def _pop_loop_frame(stack: list[dict], index: int) -> dict | None:
+        """Peel the innermost open loop frame whose body ends at/after *index*.
+
+        The frame is returned **without** removing it from the stack when the
+        loop still has passes left to run -- callers jump back into it; the
+        caller keeps the frame alive across iterations because iteration state
+        lives on the dict itself.  When the top frame does not cover this
+        ``loop_end`` (stray marker) returns None.
+        """
+        if len(stack) <= 1:
+            return None
+        entry = stack[-1]
+        if entry["start"] < index <= entry["end"]:
+            return entry
+        return None
+
+    def _condition_holds_once(self, condition: ScreenCondition, token: ExecutionToken) -> bool:
+        """One synchronous check for any rule source.
+
+        Screen rules sample the pixels; input/action rules report whether the
+        watched event already happened during this run.
+        """
+        if condition.source == "input":
+            return token.event_count(condition.event) > 0
+        if condition.source == "action":
+            return token.event_count(condition.event) > 0
+        return self._evaluate_once(condition)
 
     def _sync_triggers(self, token: ExecutionToken) -> None:
-        """Reflect the *current* screen state of the armed rules right away."""
+        """Reflect the *current* state of the armed rules right away.
+
+        Also (re)starts or stops the shared user-input listener so physical
+        key/mouse events reach exactly the macros waiting on them.
+        """
         self._apply_rule_states(token)
         token.refresh_block()
         self._record_token_block(token)
+        self._sync_input_watch()
 
     def _apply_rule_states(self, token: ExecutionToken) -> None:
         """Re-evaluate every armed rule and store its blocking state."""
@@ -588,11 +756,14 @@ class MacroEngine:
             ).start()
 
     def _monitor_loop(self) -> None:
-        """Watch the screen for every running macro's armed trigger rules.
+        """Watch every running macro's armed trigger rules.
 
-        Parks on ``_work_available`` while no macro is running instead of
-        busy-sleeping at 50 ms forever; start/stop events wake it promptly,
-        and the bounded wait covers any path that forgets to signal.
+        Screen rules are sampled live; input/action rules are checked against
+        the per-run event counters (bumped by the input listener and by the
+        worker when actions execute).  Parks on ``_work_available`` while no
+        macro is running instead of busy-sleeping at 50 ms forever; start/stop
+        events wake it promptly, and the bounded wait covers any path that
+        forgets to signal.
         """
         last_notify = 0.0
         while True:
@@ -606,6 +777,10 @@ class MacroEngine:
                     continue
                 if self._monitor_token(token):
                     changed = True
+            # Keep the shared input listener in step with demand: rules may
+            # have been disarmed by the pass above without going through
+            # _sync_triggers.
+            self._sync_input_watch()
             if changed and time.monotonic() - last_notify > 0.4:
                 last_notify = time.monotonic()
                 self._notify()  # let the UI refresh its status line
@@ -618,7 +793,11 @@ class MacroEngine:
 
         ``while`` blocks while the condition holds; ``until`` blocks until it
         holds once (then self-disarms); ``hold`` always blocks until a bare
-        start-trigger step drops it.
+        start-trigger step drops it.  Screen rules are sampled live; input
+        rules hold until the user physically performs the watched event and
+        action rules until another action of the watched kind executes --
+        both are detected by comparing the per-run event counter against the
+        baseline stored when the rule was armed.
         """
         mode = entry.get("mode")
         if mode == "hold":
@@ -626,15 +805,19 @@ class MacroEngine:
         condition = entry.get("condition")
         if condition is None or not condition.configured:
             return False
-        runtime = entry.get("_runtime")
-        if runtime is None:
-            runtime = ConditionRuntime.create(condition)
-            entry["_runtime"] = runtime
-        try:
-            holding = bool(runtime.evaluate())
-        except Exception:  # pragma: no cover - transient capture failures
-            logger.exception("Screen-condition check failed (%s)", condition.description)
-            return bool(entry.get("_blocking"))
+        source = condition.source
+        if source in ("input", "action"):
+            holding = MacroEngine._event_rule_fired(entry, condition)
+        else:
+            runtime = entry.get("_runtime")
+            if runtime is None:
+                runtime = ConditionRuntime.create(condition)
+                entry["_runtime"] = runtime
+            try:
+                holding = bool(runtime.evaluate())
+            except Exception:  # pragma: no cover - transient capture failures
+                logger.exception("Screen-condition check failed (%s)", condition.description)
+                return bool(entry.get("_blocking"))
         if mode == "while":
             return holding
         # mode == "until": met once => trigger on and disarm this rule.
@@ -643,6 +826,30 @@ class MacroEngine:
             entry["disarm"] = True
             return False
         return True
+
+    @staticmethod
+    def _event_rule_fired(entry: dict, condition: ScreenCondition) -> bool:
+        """True when the watched input/action event happened since arming.
+
+        Arming stores the current counter value as a baseline; the rule
+        "holds" as soon as the counter grows past it.  ``while`` rules clear
+        again immediately after being consumed so they only gate while the
+        most recent event matches; ``until`` rules latch via the caller's
+        disarm logic.
+        """
+        token = entry.get("_token")
+        if token is None:
+            return False
+        key = condition.event
+        count = token.event_count(key)
+        baseline = entry.get("_baseline")
+        if baseline is None:
+            entry["_baseline"] = count
+            return False
+        if count > baseline:
+            entry["_baseline"] = count  # consume the event
+            return True
+        return False
 
     def _monitor_token(self, token: ExecutionToken) -> bool:
         """Re-evaluate one macro's armed rules; True when triggers flipped.

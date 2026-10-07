@@ -30,40 +30,40 @@ def new_macro_uid() -> str:
 class ActionConfig:
     """A single step inside a macro sequence.
 
-    Besides keyboard/mouse steps, two flow-control kinds exist:
+    Besides keyboard/mouse steps, flow-control kinds exist:
 
-    * ``wait_for`` -- block until a screen condition (stored in ``condition``)
-      holds on screen.
-    * ``stop_trigger`` / ``start_trigger`` -- trigger-style flow steps.  The screen is
-      watched automatically while the macro runs: every action written after
-      a *stop_trigger* step is held back while its rule holds on screen (and resumes
-      when it clears); every action after an *start_trigger* step stays held until
-      its rule is met, then runs freely.  The rule lives in the action's
-      ``condition`` field.
+    * ``wait_for`` -- block until a condition (stored in ``condition``)
+      holds.
+    * ``stop_trigger`` / ``start_trigger`` -- trigger-style flow steps that
+      behave like an if/else pair over the stretch of actions written
+      between them.  Every action after a *stop_trigger* is held back while
+      its condition is true (and resumes when it turns false); every action
+      after a *start_trigger* stays held until its condition becomes true,
+      then runs freely.  The condition lives in the action's ``condition``
+      field and can watch the screen, user input or other actions executing.
     """
 
     kind: str = "key"  # key | hold_key | combo | type | move | click | double_click
     #                    mouse_down | mouse_up | drag | scroll | wait
-    #                    wait_for | stop_trigger | start_trigger | if_else
+    #                    wait_for | stop_trigger | start_trigger | loop_start | loop_end
     key: str = ""  # for key/hold_key actions (e.g. "a", "space", "f1")
     button: str = "left"  # for click/double_click/mouse_down/mouse_up/drag actions
     x: int | None = None  # absolute screen X (mouse actions; drag start)
     y: int | None = None  # absolute screen Y (mouse actions; drag start)
-    amount: int = 0  # scroll steps; type delay ms; drag end X
-    duration_ms: int = 50  # hold time; wait delay; drag end Y
+    amount: int = 0  # scroll steps; type delay ms; drag end X; loop_start iterations (0 = forever)
+    duration_ms: int = 50  # hold time; wait delay; drag end Y; loop_end delay ms
     combo: str = ""  # for combo actions, e.g. "ctrl+shift+d"
     text: str = ""  # for type actions, the literal string to type
-    condition: ScreenCondition | None = None  # for wait_for/stop-trigger/start-trigger/if-else actions
-    #: ``if_else`` only: sub-sequence executed when ``condition`` holds.
-    then_actions: tuple["ActionConfig", ...] = ()
-    #: ``if_else`` only: sub-sequence executed when ``condition`` does not hold.
-    else_actions: tuple["ActionConfig", ...] = ()
+    condition: ScreenCondition | None = None  # for wait_for/stop-trigger/start-trigger actions
 
 
-#: Action kinds that gate execution on a screen condition.
+#: Action kinds that gate execution on a condition (trigger flow steps).
 CONDITION_ACTION_KINDS: frozenset[str] = frozenset(
-    {"wait_for", "stop_trigger", "start_trigger", "if_else"}
+    {"wait_for", "stop_trigger", "start_trigger"}
 )
+
+#: Action kinds that jump back to their counterpart instead of advancing.
+LOOP_ACTION_KINDS: frozenset[str] = frozenset({"loop_start", "loop_end"})
 
 
 @dataclass(frozen=True)
@@ -73,14 +73,23 @@ class MacroConfig:
     The user turns the macro on and off (run button, hotkey, stop); there is
     no separate "paused" macro state.  Triggering is expressed *inside the
     action list* only: ``stop_trigger`` and ``start_trigger`` actions carry a
-    :class:`ScreenCondition` and act like triggers that gate the stretch of
-    actions written between them -- the screen is watched automatically while
-    the macro runs, holding back those actions according to the rules.  A
-    ``wait_for`` action simply blocks until its condition holds.
+    :class:`ScreenCondition` and act like an if/else pair that gates the
+    stretch of actions written between them -- the condition source (screen,
+    user input, executed actions) is watched automatically while the macro
+    runs, holding back those actions according to the rules.  A ``wait_for``
+    action simply blocks until its condition holds.
+
+    Looping is likewise an *action*, not a general option: wrap the steps to
+    repeat in a ``loop_start`` / ``loop_end`` pair (iteration count on the
+    start step, delay between passes on the end step).  The legacy
+    ``repeat``/``loops``/``interval_ms`` fields below are kept only so old
+    documents still load; they are migrated into loop actions at load time.
     """
 
     name: str = "New macro"
     start_hotkey: str = "f6"
+    #: Legacy general-section looping (replaced by the loop_start/loop_end
+    #: actions).  Migrated at load time; new edits always leave these alone.
     repeat: bool = False
     loops: int = 1  # ignored when repeat is True
     interval_ms: int = 0  # delay between loops
@@ -110,24 +119,41 @@ def _action_from_dict(raw: Any) -> ActionConfig:
     known = {
         k: v
         for k, v in raw.items()
-        if k in ActionConfig.__dataclass_fields__ and k not in ("condition", "then_actions", "else_actions")
+        if k in ActionConfig.__dataclass_fields__ and k != "condition"
     }
     condition = _condition_from_dict(raw.get("condition"))
-    # ``if_else`` carries nested sub-sequences; one level of nesting is the
-    # supported depth (an if_else inside then/else is dropped with a warning).
-    branches: dict[str, tuple[ActionConfig, ...]] = {}
-    for field in ("then_actions", "else_actions"):
-        items = raw.get(field, [])
-        built: list[ActionConfig] = []
-        if isinstance(items, list):
-            for item in items:
-                child = _action_from_dict(item)
-                if child.kind == "if_else":
-                    logger.warning("Nested if_else ignored (max depth 1)")
-                    continue
-                built.append(child)
-        branches[field] = tuple(built)
-    return ActionConfig(condition=condition, **known, **branches)
+    return ActionConfig(condition=condition, **known)
+
+
+def _migrate_if_else_actions(actions: list[ActionConfig]) -> list[ActionConfig]:
+    """Unfold removed ``if_else`` steps into a start/stop trigger pair.
+
+    Older documents could contain an *If / else* flow step branching on a
+    screen rule.  That kind no longer exists -- start/stop triggers provide
+    the same if/else gating directly -- so each old step is replaced by its
+    "then" sub-sequence wrapped between a ``start_trigger`` (run when the
+    rule holds) and a ``stop_trigger`` (hold while the rule holds again).
+    The "else" sub-sequence is dropped with a warning; nothing else about
+    the sequence changes.
+    """
+    migrated: list[ActionConfig] = []
+    for action in actions:
+        if action.kind != "if_else":
+            migrated.append(action)
+            continue
+        condition = action.condition
+        if action.else_actions:
+            logger.warning(
+                "Removed if_else step: %d 'else' action(s) dropped; "
+                "'then' actions wrapped in a start/stop trigger pair instead",
+                len(action.else_actions),
+            )
+        if condition is not None and condition.configured:
+            migrated.append(ActionConfig(kind="start_trigger", condition=condition))
+        migrated.extend(_migrate_if_else_actions(list(action.then_actions)))
+        if condition is not None and condition.configured:
+            migrated.append(ActionConfig(kind="stop_trigger", condition=condition))
+    return migrated
 
 
 def _condition_from_dict(raw: Any) -> ScreenCondition | None:
