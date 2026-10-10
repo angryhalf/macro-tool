@@ -31,12 +31,10 @@ def sample_macro(name: str = "Demo") -> MacroConfig:
     return MacroConfig(
         name=name,
         start_hotkey="ctrl+f6",
-        repeat=True,
-        loops=3,
-        interval_ms=250,
         uid=new_macro_uid(),
         enabled=False,
         actions=(
+            ActionConfig(kind="loop_start", amount=2),
             ActionConfig(kind="combo", combo="ctrl+c"),
             ActionConfig(
                 kind="wait_for",
@@ -47,11 +45,15 @@ def sample_macro(name: str = "Demo") -> MacroConfig:
             ),
             ActionConfig(kind="drag", x=10, y=20, amount=30, duration_ms=40),
             ActionConfig(
-                kind="if_else",
+                kind="stop_trigger",
                 condition=ScreenCondition(mode="region_changed"),
-                then_actions=(ActionConfig(kind="key", key="a"),),
-                else_actions=(ActionConfig(kind="key", key="b"),),
             ),
+            ActionConfig(kind="key", key="a"),
+            ActionConfig(
+                kind="start_trigger",
+                condition=ScreenCondition(mode="region_changed"),
+            ),
+            ActionConfig(kind="loop_end", duration_ms=250),
         ),
     )
 
@@ -67,10 +69,10 @@ def test_settings_round_trip(tmp_path):
     first = loaded.macros[0]
     assert first.uid == original.macros[0].uid  # stable identity survives saves
     assert first.enabled is False
-    action = first.actions[3]
-    assert action.kind == "if_else"
-    assert len(action.then_actions) == 1 and action.then_actions[0].key == "a"
-    assert len(action.else_actions) == 1 and action.else_actions[0].key == "b"
+    assert first.actions == original.macros[0].actions
+    kinds = [a.kind for a in first.actions]
+    assert "stop_trigger" in kinds and "start_trigger" in kinds
+    assert "if_else" not in kinds  # removed flow kind never round-trips
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == SETTINGS_SCHEMA_VERSION
 
@@ -112,28 +114,71 @@ def test_unknown_action_fields_are_dropped(tmp_path):
     assert macro.actions[0].key == "z"
 
 
-def test_nested_if_else_beyond_depth_one_is_dropped(tmp_path):
-    """One nesting level is supported; deeper branches are dropped with a warning."""
-    deep = ActionConfig(
-        kind="if_else",
-        condition=ScreenCondition(mode="image_found", template_path="x.png"),
-        then_actions=(
-            ActionConfig(
-                kind="if_else",
-                then_actions=(ActionConfig(kind="key", key="q"),),
-            ),
-            ActionConfig(kind="key", key="w"),
-        ),
-    )
-    macro = replace(sample_macro(), actions=(deep,))
+def test_legacy_if_else_is_migrated_to_trigger_pair(tmp_path):
+    """Removed ``if_else`` steps unfold into a start/stop trigger pair.
+
+    Old documents could contain an *If / else* flow step with nested branch
+    sub-sequences.  That kind no longer exists -- start/stop triggers provide
+    the same if/else gating directly -- so on load the "then" actions are
+    wrapped between a ``start_trigger`` and a ``stop_trigger`` carrying the
+    old condition, and any "else" actions are dropped with a warning.
+    """
     path = tmp_path / "settings.json"
-    save_settings(AppSettings(macros=(macro,)), path)
-    loaded = load_settings(path).macros[0]
-    outer = loaded.actions[0]
-    assert outer.kind == "if_else"
-    kinds = [child.kind for child in outer.then_actions]
-    assert "if_else" not in kinds  # depth-2 branch dropped
-    assert kinds == ["key"] and outer.then_actions[0].key == "w"
+    path.write_text(
+        json.dumps(
+            {
+                "macros": [
+                    {
+                        "name": "Legacy",
+                        "actions": [
+                            {"kind": "key", "key": "z"},
+                            {
+                                "kind": "if_else",
+                                "condition": {"mode": "image_found", "template_path": "x.png"},
+                                "then_actions": [{"kind": "key", "key": "a"}],
+                                "else_actions": [{"kind": "key", "key": "b"}],
+                            },
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    macro = load_settings(path).macros[0]
+    kinds = [a.kind for a in macro.actions]
+    assert "if_else" not in kinds
+    assert kinds == ["key", "start_trigger", "key", "stop_trigger"]
+    gate = macro.actions[1]
+    assert gate.condition is not None and gate.condition.template_path == "x.png"
+    assert macro.actions[2].key == "a"
+
+
+def test_legacy_general_looping_migrates_to_loop_actions(tmp_path):
+    """Old repeat/loops/interval_ms options become a loop_start/loop_end pair."""
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "macros": [
+                    {
+                        "name": "Looped",
+                        "repeat": True,
+                        "loops": 3,
+                        "interval_ms": 250,
+                        "actions": [{"kind": "key", "key": "a"}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    macro = load_settings(path).macros[0]
+    assert macro.repeat is False and macro.loops == 1 and macro.interval_ms == 0
+    kinds = [a.kind for a in macro.actions]
+    assert kinds == ["loop_start", "key", "loop_end"]
+    assert macro.actions[0].amount == 0  # repeat -> forever (0 iterations)
+    assert macro.actions[2].duration_ms == 250
 
 
 # ------------------------------------------------------------------ macro export
@@ -145,7 +190,7 @@ def test_macro_export_import_round_trip(tmp_path):
     assert payload["kind"] == "macro"
     reloaded = load_macro_json(path)
     assert reloaded.name == "Exported"
-    assert reloaded.actions == macro.actions  # nested if_else included
+    assert reloaded.actions == macro.actions  # loop + trigger actions included
 
 
 def test_load_macro_json_accepts_whole_settings_document(tmp_path):

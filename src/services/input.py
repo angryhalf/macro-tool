@@ -158,13 +158,14 @@ def perform_action(action: ActionConfig, cancel: Callable[[], bool] | None = Non
     as possible **while releasing every key/button it already pressed**, so
     an emergency stop never leaves modifiers or mouse buttons stuck down.
 
-    Flow-control kinds (``wait_for``, ``stop_trigger``, ``start_trigger``) are handled by
+    Flow-control kinds (``wait_for``, ``stop_trigger``, ``start_trigger``,
+    ``loop_start``, ``loop_end``) are handled by
     :class:`~core.macro_engine.MacroEngine` itself and never reach real input
     synthesis; they are accepted here as no-ops so ad-hoc action lists can be
     played through this function without special-casing.
     """
     kind = action.kind
-    if kind in ("wait_for", "stop_trigger", "start_trigger"):
+    if kind in ("wait_for", "stop_trigger", "start_trigger", "loop_start", "loop_end"):
         return
     if kind in ("key", "hold_key"):
         _perform_key(kind, action.key, action.duration_ms, cancel)
