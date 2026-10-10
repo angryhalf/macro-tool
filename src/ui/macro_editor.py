@@ -1,22 +1,24 @@
 """Macro editor: actions, stop-trigger/start-trigger flow steps and input recording.
 
 * :class:`ActionEditorDialog` -- edit one step of a macro's action list.  On
-  top of the keyboard/mouse kinds there are three *flow-control* actions that
-  carry a screen condition (built with :class:`ConditionEditor` from
-  :mod:`ui.condition_editor`):
+  top of the keyboard/mouse kinds there are five *flow-control* actions:
 
-  - **Wait until** (``wait_for``) blocks until the rule holds on screen.
+  - **Wait until** (``wait_for``) blocks until its rule holds; the rule can
+    watch the screen, physical user input or another action executing
+    (built with :class:`ConditionEditor` from :mod:`ui.condition_editor`).
   - **Stop trigger** (``stop_trigger``) opens a stretch whose actions are held back
-    while the rule is present on screen.
+    while the rule is present (or triggers them off on an event).
   - **Start trigger** (``start_trigger``) closes that stretch (and can itself wait
     for its rule before execution continues).
+  - **Loop start** / **Loop end** (``loop_start`` / ``loop_end``) repeat the
+    steps written between them -- looping is an action, not a general option.
 
   Every action type shows only the fields it needs, and *Record* buttons
   capture live keyboard/mouse input through pynput.
 * :class:`MacroRecorderDialog` -- record an entire input session (keys,
   clicks, moves, scrolls, timings) into an ordered action list in one go.
 * :class:`MacroEditorDialog` -- edit a macro: metadata (name, hotkey,
-  looping), plus its action table.
+  enabled), plus its action table.
 """
 
 from __future__ import annotations
