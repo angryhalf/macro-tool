@@ -93,6 +93,11 @@ _FLOW_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_trigger")
 #: rule in ``ActionConfig.condition``.
 _CONDITION_PAGE_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_trigger")
 
+#: Kinds that jump back/forward to their counterpart (kept in sync with the
+#: settings/engine constant of the same name); they have no keyboard/mouse
+#: fields of their own.
+from app.settings import LOOP_ACTION_KINDS  # noqa: E402
+
 BUTTONS = ["left", "right", "middle"]
 
 _KEY_FIELD_HINT = "One press of the key when the macro runs (e.g. a, space, f5, enter)."
@@ -114,11 +119,14 @@ _CONDITION_HINTS: dict[str, str] = {
         "screen event appears; until then those actions stay held.  Without "
         "a rule it simply releases the hold opened by the last 'Stop trigger'."
     ),
-    "if_else": (
-        "Samples the screen rule once right here and runs only the matching "
-        "branch below -- 'If' when the rule is on screen, 'Else' otherwise. "
-        "Branches hold plain keyboard/mouse steps only (no nested flow "
-        "actions).  An unconfigured rule takes the Else branch."
+    "loop_start": (
+        "Opens a loop.  Everything written between this step and the matching "
+        "'Loop end' step repeats.  Optionally set an iteration delay below."
+    ),
+    "loop_end": (
+        "Closes the nearest open 'Loop start'.  Jump back to the loop start "
+        "after waiting the optional iteration delay set here (in ms).  An "
+        "unmatched 'Loop end' is ignored at run time."
     ),
 }
 
@@ -189,6 +197,8 @@ class ActionEditorDialog(QDialog):
         self._add_page("drag", self._build_drag_page(action))
         self._add_page("scroll", self._build_scroll_page(action))
         self._add_page("wait", self._build_wait_page(action))
+        self._add_page("loop_start", self._build_loop_page(action, "loop_start"))
+        self._add_page("loop_end", self._build_loop_page(action, "loop_end"))
         # All flow-control kinds share the single condition page above;
         # it is registered for each kind so the stacked widget can show it.
         for kind in _CONDITION_PAGE_KINDS:
@@ -197,8 +207,6 @@ class ActionEditorDialog(QDialog):
         # maps to the same shared editor instance.
         for kind in _CONDITION_PAGE_KINDS:
             self._condition_editors[kind] = self._shared_condition
-        # ``if_else`` additionally gets branch editors appended to that page.
-        self._if_else_box = self._build_if_else_branches(action)
 
         self._kind.currentIndexChanged.connect(self._show_page)
 
@@ -398,87 +406,25 @@ class ActionEditorDialog(QDialog):
         layout.addWidget(editor)
         return page, editor
 
-    def _build_if_else_branches(self, action: ActionConfig) -> QWidget:
-        """If/Else branch editors appended to the shared condition page.
+    def _build_loop_page(self, action: ActionConfig, kind: str) -> QWidget:
+        """Page for the ``loop_start`` / ``loop_end`` actions.
 
-        Each branch is a plain list of keyboard/mouse steps edited through
-        :class:`ActionEditorDialog` itself (nesting one level deep is the
-        supported maximum -- nested flow actions are refused on input).
-        The whole box is only visible for the ``if_else`` kind.
+        Each loop marker only carries an optional delay in ms (stored on
+        ``duration_ms``): for ``loop_start`` it is applied before every
+        iteration, for ``loop_end`` before jumping back to the start.
         """
-        box = QWidget()
-        outer = QVBoxLayout(box)
-        outer.setContentsMargins(0, 4, 0, 0)
-        self._branch_lists: dict[str, QListWidget] = {}
-        for field, label in (("then_actions", "If"), ("else_actions", "Else")):
-            outer.addWidget(QLabel(f"<b>{label} branch</b>"))
-            list_box, button_row = _branch_editor(label)
-            add_button = button_row.itemAt(0).widget()
-            remove_button = button_row.itemAt(1).widget()
-            add_button.clicked.connect(lambda _=False, f=field: self._edit_branch_step(f, None))
-            remove_button.clicked.connect(
-                lambda _=False, lb=list_box: self._remove_branch_step(lb)
-            )
-            outer.addWidget(list_box)
-            outer.addLayout(button_row)
-            self._branch_lists[field] = list_box
-            for child in getattr(action, field):
-                self._append_branch_item(list_box, child)
-        box.setVisible(False)
-        return box
-
-    def _append_branch_item(self, list_box: QListWidget, child: ActionConfig) -> None:
-        name, details = MacroEditorDialog.describe(child)
-        item = QListWidgetItem(f"{name}: {details}")
-        # Keep the model object on the item so order survives edits.
-        item.setData(Qt.ItemDataRole.UserRole, child)
-        list_box.addItem(item)
-
-    def _edit_branch_step(self, field: str, existing: ActionConfig | None) -> None:
-        """Open an :class:`ActionEditorDialog` for one branch step (in place)."""
-        list_box = self._branch_lists[field]
-        dialog = ActionEditorDialog(existing or ActionConfig(), parent=self)
-        if not dialog.exec():
-            return
-        new_action = dialog.action()
-        if new_action.kind in CONDITION_ACTION_KINDS:
-            # Nested flow actions inside a branch are unsupported; silently
-            # drop them at the UI boundary instead of writing bad data.
-            from PySide6.QtWidgets import QMessageBox
-
-            QMessageBox.warning(
-                self,
-                "Not allowed",
-                "Branch steps must be plain keyboard/mouse actions; "
-                "flow-control actions cannot nest inside If/Else.",
-            )
-            return
-        if existing is None:
-            self._append_branch_item(list_box, new_action)
-            return
-        row = list_box.currentRow()
-        if row >= 0:
-            item = list_box.takeItem(row)
-            del item
-            fresh = QListWidgetItem()
-            name, details = MacroEditorDialog.describe(new_action)
-            fresh.setText(f"{name}: {details}")
-            fresh.setData(Qt.ItemDataRole.UserRole, new_action)
-            list_box.insertItem(row, fresh)
-
-    @staticmethod
-    def _remove_branch_step(list_box: QListWidget) -> None:
-        row = list_box.currentRow()
-        if row >= 0:
-            list_box.takeItem(row)
-
-    def _branch_actions(self, field: str) -> tuple[ActionConfig, ...]:
-        list_box = self._branch_lists[field]
-        return tuple(
-            list_box.item(row).data(Qt.ItemDataRole.UserRole)
-            for row in range(list_box.count())
-            if list_box.item(row).data(Qt.ItemDataRole.UserRole) is not None
+        page = QWidget()
+        form = QFormLayout(page)
+        spin = QSpinBox(minimum=0, maximum=600_000, value=max(0, action.duration_ms))
+        spin.setSuffix(" ms")
+        label = (
+            "Delay per iteration:"
+            if kind == "loop_start"
+            else "Delay before repeating:"
         )
+        form.addRow(label, spin)
+        setattr(self, f"_loop_{kind}_delay", spin)
+        return page
 
     @staticmethod
     def _position_spins(action: ActionConfig) -> tuple[QSpinBox, QSpinBox]:
@@ -494,7 +440,6 @@ class ActionEditorDialog(QDialog):
         if kind in _CONDITION_HINTS:  # a flow-control action
             self._condition_hint.setText(_CONDITION_HINTS[kind])
             self._shared_condition.set_timeout_visible(kind == "wait_for")
-            self._if_else_box.setVisible(kind == "if_else")
         page = self._page_for_kind.get(kind)
         if page is not None:
             self._pages.setCurrentWidget(page)
@@ -755,20 +700,15 @@ class ActionEditorDialog(QDialog):
             condition = editor.build() if editor is not None else None
             duration_ms = 0
             if condition is not None and not condition.configured:
-                # Unconfigured rule: store None, but *keep* the user's other
-                # inputs (branches below) rather than silently discarding them.
+                # Unconfigured rule: store None rather than a half-built rule.
                 condition = None
             elif kind == "wait_for" and condition is not None:
                 # Give-up timeout lives on the action's duration_ms field.
                 duration_ms = condition.timeout_ms
-            if kind == "if_else":
-                return ActionConfig(
-                    kind=kind,
-                    condition=condition,
-                    then_actions=self._branch_actions("then_actions"),
-                    else_actions=self._branch_actions("else_actions"),
-                )
             return ActionConfig(kind=kind, condition=condition, duration_ms=duration_ms)
+        if kind in LOOP_ACTION_KINDS:
+            delay = getattr(self, f"_loop_{kind}_delay").value()
+            return ActionConfig(kind=kind, duration_ms=delay)
         return ActionConfig(kind=kind)
 
 
@@ -1093,7 +1033,10 @@ class MacroEditorDialog(QDialog):
 
     Layout top-to-bottom:
 
-    * **General** -- name, start hotkey, repeat/loops and loop interval.
+    * **General** -- name, start hotkey and the enabled flag.  Looping is no
+      longer a general setting: add "Loop start" / "Loop end" steps in the
+      Actions table instead (the legacy repeat/loops fields are migrated
+      automatically when an old settings file is loaded).
       The user turns the macro on and off; there is no separate pause state.
     * **Actions** -- an ordered table of steps with add/edit/remove/reorder
       controls plus a whole-session recorder.  The triggers are *actions*:
@@ -1118,22 +1061,12 @@ class MacroEditorDialog(QDialog):
         # -- general ---------------------------------------------------
         self._name = QLineEdit(macro.name)
         self._hotkey = HotkeyButton(macro.start_hotkey)
-        self._repeat = QCheckBox("Repeat until stopped")
-        self._repeat.setChecked(macro.repeat)
-        self._loops = QSpinBox(minimum=1, maximum=9999, value=max(1, macro.loops))
-        self._loops.setEnabled(not macro.repeat)
-        self._repeat.toggled.connect(self._loops.setDisabled)
-        self._interval = QSpinBox(minimum=0, maximum=600_000, value=macro.interval_ms)
-        self._interval.setSuffix(" ms")
         self._enabled = QCheckBox("Enabled (unchecked macros ignore their hotkey and Run clicks)")
         self._enabled.setChecked(macro.enabled)
 
         meta_form = QFormLayout()
         meta_form.addRow("Name:", self._name)
         meta_form.addRow("Start hotkey:", self._hotkey)
-        meta_form.addRow("Repeat:", self._repeat)
-        meta_form.addRow("Loops:", self._loops)
-        meta_form.addRow("Loop interval:", self._interval)
         meta_form.addRow("", self._enabled)
         meta_box = QGroupBox("General")
         meta_box.setLayout(meta_form)
@@ -1207,10 +1140,15 @@ class MacroEditorDialog(QDialog):
             "wait_for": ("Wait until", cond),
             "stop_trigger": ("Stop trigger", cond),
             "start_trigger": ("Start trigger", cond),
-            "if_else": (
-                "If / else",
-                f"{cond}  →  if: {len(action.then_actions)} step(s), "
-                f"else: {len(action.else_actions)} step(s)",
+            "loop_start": (
+                "Loop start",
+                f"forever, {action.duration_ms} ms delay"
+                if action.duration_ms
+                else "forever",
+            ),
+            "loop_end": (
+                "Loop end",
+                f"{action.duration_ms} ms delay" if action.duration_ms else "",
             ),
         }
         return labels.get(action.kind, (action.kind, ""))
@@ -1277,13 +1215,15 @@ class MacroEditorDialog(QDialog):
 
     # ------------------------------------------------------------------
     def macro(self) -> MacroConfig:
-        """Build the :class:`MacroConfig` described by this dialog."""
+        """Build the :class:`MacroConfig` described by this dialog.
+
+        Looping lives entirely in the action list now (``loop_start`` /
+        ``loop_end`` steps), so the legacy repeat/loops/interval fields are
+        left at their neutral defaults.
+        """
         return MacroConfig(
             name=self._name.text().strip() or "Unnamed macro",
             start_hotkey=self._hotkey.hotkey,
-            repeat=self._repeat.isChecked(),
-            loops=self._loops.value(),
-            interval_ms=self._interval.value(),
             actions=tuple(self._actions),
             uid=self._uid,
             enabled=self._enabled.isChecked(),
