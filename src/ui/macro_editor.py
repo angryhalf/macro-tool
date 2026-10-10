@@ -77,32 +77,21 @@ ACTION_KINDS: dict[str, str] = {
     "Drag": "drag",
     "Scroll": "scroll",
     "Wait": "wait",
-    "Wait until (screen)": "wait_for",
-    "Stop trigger (screen)": "stop_trigger",
-    "Start trigger (screen)": "start_trigger",
-    "If / else (screen)": "if_else",
+    "Wait until": "wait_for",
+    "Stop trigger": "stop_trigger",
+    "Start trigger": "start_trigger",
+    "Loop start": "loop_start",
+    "Loop end": "loop_end",
 }
 
-#: Action kinds that gate execution on a screen rule (kept in sync with the
-#: engine's ``CONDITION_ACTION_KINDS``).
-_FLOW_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_trigger", "if_else")
+#: Action kinds that gate execution on a rule (kept in sync with the
+#: engine's ``CONDITION_ACTION_KINDS``).  Rules can watch the screen,
+#: physical user input or other actions executing -- see ConditionEditor.
+_FLOW_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_trigger")
 
 #: Kinds whose page is the shared condition editor and which store their
-#: screen rule in ``ActionConfig.condition``.
-_CONDITION_PAGE_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_trigger", "if_else")
-
-
-def _branch_editor(kind_label: str) -> tuple[QListWidget, QHBoxLayout]:
-    """Build one *If* / *Else* branch list widget plus its add/remove row."""
-    box = QListWidget()
-    box.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-    add = QPushButton(f"Add step to {kind_label}")
-    remove = QPushButton("Remove selected")
-    row = QHBoxLayout()
-    row.addWidget(add)
-    row.addWidget(remove)
-    row.addStretch()
-    return box, row
+#: rule in ``ActionConfig.condition``.
+_CONDITION_PAGE_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_trigger")
 
 BUTTONS = ["left", "right", "middle"]
 

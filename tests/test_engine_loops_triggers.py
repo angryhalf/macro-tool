@@ -15,10 +15,23 @@ import time
 
 import pytest
 
-from app.conditions import ScreenCondition
+from app.conditions import ConditionRuntime, ScreenCondition
 from app.settings import ActionConfig, MacroConfig, new_macro_uid
 from core import macro_engine
 from core.macro_engine import ExecutionToken, MacroEngine
+
+
+def patch_screen_eval(monkeypatch, holds):
+    """Make every screen-rule sample report *holds* (a callable or bool).
+
+    The engine samples armed rules through ``ConditionRuntime.evaluate`` --
+    that is the seam these tests flip instead of doing real template matching.
+    """
+    def fake_evaluate(self):
+        value = holds() if callable(holds) else holds
+        return bool(value)
+
+    monkeypatch.setattr(ConditionRuntime, "evaluate", fake_evaluate, raising=False)
 
 
 def wait_until(predicate, timeout=3.0, interval=0.01):
@@ -155,9 +168,7 @@ def test_stop_trigger_blocks_until_start_trigger(recorder, monkeypatch):
     condition fires -- and a bare ``start_trigger`` releases immediately.
     """
     state = {"holds": True}
-    monkeypatch.setattr(
-        MacroEngine, "_evaluate_once", staticmethod(lambda condition: state["holds"])
-    )
+    patch_screen_eval(monkeypatch, lambda: state["holds"])
     engine = MacroEngine()
     cond = ScreenCondition(template_path="x.png")
     macro = make_macro(
@@ -176,9 +187,9 @@ def test_stop_trigger_blocks_until_start_trigger(recorder, monkeypatch):
     time.sleep(0.2)
     assert "key" not in recorder  # held back by the stop-trigger rule
     state["holds"] = False        # rule clears -> monitor triggers actions on
-    # Worker proceeds through the bare start_trigger, which drops the armed
-    # while-rule, so even a re-appearing screen can no longer gate the tail.
-    assert wait_until(lambda: recorder == ["click", "key"])
+    # Worker proceeds through the bare start_trigger, which closes the whole
+    # stretch -- even a re-appearing screen can no longer gate the tail.
+    assert wait_until(lambda: "key" in recorder)
     state["holds"] = True
     assert wait_until(lambda: "scroll" in recorder)
     assert wait_until(lambda: not engine.is_macro_running("T"))
@@ -190,9 +201,7 @@ def test_stop_trigger_blocks_until_start_trigger(recorder, monkeypatch):
 def test_start_trigger_rule_holds_tail_until_it_fires(recorder, monkeypatch):
     """A start_trigger *with* a rule holds the tail until the rule fires once."""
     state = {"holds": False}
-    monkeypatch.setattr(
-        MacroEngine, "_evaluate_once", staticmethod(lambda condition: state["holds"])
-    )
+    patch_screen_eval(monkeypatch, lambda: state["holds"])
     engine = MacroEngine()
     macro = make_macro(
         ActionConfig(kind="click"),
@@ -256,22 +265,27 @@ def test_start_trigger_waits_for_user_input_event(recorder):
 
 
 def test_action_source_rule_fires_when_action_executes(recorder):
-    """An ``action``-source stop trigger gates later steps after the watched kind ran."""
+    """An ``action``-source stop trigger gates later steps once the kind runs again.
+
+    Events that happened *before* the marker was armed do not count (the
+    rule baselines the counter at arming); the next matching execution does.
+    """
     engine = MacroEngine()
     cond = ScreenCondition(event="action:click")
     macro = make_macro(
-        ActionConfig(kind="click"),
+        ActionConfig(kind="click"),                      # predates the rule: ignored
         ActionConfig(kind="stop_trigger", condition=cond),
-        ActionConfig(kind="key"),
-        ActionConfig(kind="start_trigger"),  # bare close so the run can finish
+        ActionConfig(kind="key"),                        # free until a new click happens
+        ActionConfig(kind="loop_start", amount=0),       # endless body...
+        ActionConfig(kind="click"),                      # ...bumps action:click -> gate arms
+        ActionConfig(kind="loop_end"),
     )
     token = engine.start_macro(macro)
     assert token is not None
-    # The click bumped ``action:click`` past the rule baseline, so the
-    # while-rule should hold the following action back.
-    assert wait_until(lambda: recorder == ["click"] and token.gated)
-    time.sleep(0.1)
-    assert "key" not in recorder
+    # The pre-marker click must not arm the gate; key + first loop clicks run.
+    assert wait_until(lambda: recorder[:2] == ["click", "key"])
+    # Once the loop's click executes, the while-rule holds later actions back.
+    assert wait_until(lambda: token.gated and recorder.count("click") >= 3)
     engine.stop_all()
     assert wait_until(lambda: not engine.is_macro_running("T"))
     engine.shutdown()

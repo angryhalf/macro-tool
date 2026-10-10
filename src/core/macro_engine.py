@@ -8,17 +8,19 @@ expressed by ordinary actions:
 * ``wait_for`` -- block until its condition holds (optional timeout).
 * ``stop_trigger <rule>`` -- hold later actions while the rule is true.
 * ``start_trigger <rule>`` -- keep later actions held until the rule becomes
-  true.  Together the two steps work like an if/else over the stretch of
-  actions written between them.
+  true.  A bare ``start_trigger`` closes the stretch: it drops every armed
+  rule so later actions run freely again.  Together the two steps work like
+  an if/else over the stretch of actions written between them.
 * ``loop_start`` / ``loop_end`` -- jump back/forward pair that repeats the
   steps between them (iteration count on the start step, delay on the end
   step) instead of a general per-macro loop option.
 
 Rules watch three kinds of sources: the screen (polled by the background
 monitor), physical user input (keyboard/mouse events recorded live) and
-other actions executing inside the same run.  Flow steps never halt
-themselves -- normal actions call :meth:`ExecutionToken.wait_while_blocked`
-before firing.
+other actions executing inside the same run.  Event-based rules baseline
+their counter when armed, so only events happening *after* the trigger step
+count.  Flow steps never halt themselves -- normal actions call
+:meth:`ExecutionToken.wait_while_blocked` before firing.
 """
 
 from __future__ import annotations
@@ -550,10 +552,17 @@ class MacroEngine:
                 with token.rules_lock:
                     if has_rule:
                         assert condition is not None
-                        token.blocked_rules.append(
-                            {"mode": "while", "condition": condition, "_runtime": None,
-                             "_blocking": False, "_token": token}
-                        )
+                        entry = {
+                            "mode": "while", "condition": condition, "_runtime": None,
+                            "_blocking": False, "_token": token,
+                        }
+                        if condition.source in ("input", "action"):
+                            # Baseline the counter at arming so only events
+                            # happening *from now on* gate later actions --
+                            # a click that ran before this marker must not
+                            # instantly satisfy an ``action:click`` rule.
+                            entry["_baseline"] = token.event_count(condition.event)
+                        token.blocked_rules.append(entry)
                         message = (
                             "Stop trigger armed at step %d/%d: actions after this point are "
                             "triggered off while '%s' holds"
@@ -574,29 +583,26 @@ class MacroEngine:
                 if has_rule:
                     # Trigger on only after this rule fires once.
                     assert condition is not None
-                    if self._condition_holds_once(condition, token):
-                        logger.info(
-                            "Start-trigger condition already met at step %d/%d: actions "
-                            "after this point run freely",
-                            index + 1, total,
-                        )
-                    else:
-                        with token.rules_lock:
-                            token.blocked_rules.append(
-                                {"mode": "until", "condition": condition, "_runtime": None,
-                                 "_blocking": True, "_token": token}
-                            )
-                        logger.info(
-                            "Start trigger armed at step %d/%d: actions after this point "
-                            "stay triggered off until '%s' fires",
-                            index + 1, total, condition.description,
-                        )
+                    entry = {
+                        "mode": "until", "condition": condition, "_runtime": None,
+                        "_blocking": True, "_token": token,
+                    }
+                    if condition.source in ("input", "action"):
+                        # Only events happening *after* arming release the tail.
+                        entry["_baseline"] = token.event_count(condition.event)
+                    with token.rules_lock:
+                        token.blocked_rules.append(entry)
+                    logger.info(
+                        "Start trigger armed at step %d/%d: actions after this point "
+                        "stay triggered off until '%s' fires",
+                        index + 1, total, condition.description,
+                    )
                 else:
                     # Close the current stretch: drop every hold/until entry
                     # *and* any stop-trigger rule that gated the stretch, so
                     # the actions written after this marker run freely again.
                     with token.rules_lock:
-                        token.blocked_rules = [e for e in token.blocked_rules if e["mode"] != "while"]
+                        token.blocked_rules = []
                     token.refresh_block()
                     logger.info("Trigger stretch closed at step %d/%d", index + 1, total)
                 self._sync_triggers(token)
@@ -659,18 +665,6 @@ class MacroEngine:
                     continue  # exhausted earlier -- look one level out
                 return entry
         return None
-
-    def _condition_holds_once(self, condition: ScreenCondition, token: ExecutionToken) -> bool:
-        """One synchronous check for any rule source.
-
-        Screen rules sample the pixels; input/action rules report whether the
-        watched event already happened during this run.
-        """
-        if condition.source == "input":
-            return token.event_count(condition.event) > 0
-        if condition.source == "action":
-            return token.event_count(condition.event) > 0
-        return self._evaluate_once(condition)
 
     def _sync_triggers(self, token: ExecutionToken) -> None:
         """Reflect the *current* state of the armed rules right away.
