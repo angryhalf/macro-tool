@@ -20,6 +20,9 @@ the macro's actions in response.
   - *Image appears / disappears* inside chosen screen region(s) — pick
     multiple regions to AND/OR together (template matching with adjustable
     confidence)
+  - *Colour appears / disappears* — detect a specific colour (hex value,
+    colour dialog, or eyedropper sampled from the screen) covering a minimum
+    fraction of the watched region(s), with adjustable per-channel tolerance
   - *Region changes* (motion/pixel-difference detection)
   - **Wait until** (`wait_for`) blocks execution until the rule holds on screen
   - **Stop trigger** (`stop_trigger`) holds back every action written after it while the rule is present

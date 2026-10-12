@@ -4,7 +4,9 @@ A :class:`ScreenCondition` describes one rule the app reacts to.  Rules come
 from three sources, selected by the ``event`` field:
 
 * **screen** (``event=""``, the default): an image appearing or disappearing
-  (template matching) or a region changing (pixel-difference detection).
+  (template matching), a specific colour appearing/disappearing inside a
+  region (HSV-range pixel counting) or a region changing (pixel-difference
+  detection).
 * **user input** (``key:<name>`` / ``mouse:<button>`` / ``wheel``): fires when
   the user physically performs that input while the macro runs.
 * **action** (``action:<kind>``): fires when another macro action of that
@@ -47,9 +49,10 @@ class ScreenCondition:
     """One reaction rule (screen, user input, or executed action).
 
     Attributes:
-        mode: ``image_found`` | ``image_missing`` | ``region_changed`` for
-            screen rules; mirrored from the event target for input/action
-            rules (kept only for backwards-compatible serialisation).
+        mode: ``image_found`` | ``image_missing`` | ``region_changed`` |
+            ``color_present`` | ``color_absent`` for screen rules; mirrored
+            from the event target for input/action rules (kept only for
+            backwards-compatible serialisation).
         event: Empty (default) for pure screen rules; otherwise
             ``key:<name>`` / ``mouse:<button>`` / ``wheel`` for user-input
             rules and ``action:<kind>`` for rules that fire when another
@@ -76,6 +79,15 @@ class ScreenCondition:
     #: *every* listed rectangle (logical screen coords).  Empty means the
     #: single :attr:`region` is used -- old documents load unchanged.
     all_regions: tuple[tuple[int, int, int, int], ...] = ()
+    #: Target colour for the ``color_present`` / ``color_absent`` modes as a
+    #: ``#RRGGBB`` hex string (empty = not configured).
+    color_hex: str = ""
+    #: Per-channel tolerance in [0, 255] applied around the target colour when
+    #: counting matching pixels (hue uses half of it -- OpenCV's HSV scale).
+    color_tolerance: int = 40
+    #: Fraction (0..1) of the watched region that must match the colour before
+    #: ``color_present`` holds; ``color_absent`` holds below this fraction.
+    color_ratio: float = 0.01
 
     @property
     def source(self) -> str:
@@ -102,6 +114,10 @@ class ScreenCondition:
             return bool(self.target)
         if self.mode == "region_changed":
             return True
+        if self.mode in ("color_present", "color_absent"):
+            from core.screen_watch import parse_hex_color  # local import: avoid cycles
+
+            return parse_hex_color(self.color_hex) is not None
         return bool(self.template_path)
 
     @property
@@ -111,6 +127,8 @@ class ScreenCondition:
             "image_found": "image appears",
             "image_missing": "image disappears",
             "region_changed": "region changes",
+            "color_present": f"colour {self.color_hex or '?'} appears",
+            "color_absent": f"colour {self.color_hex or '?'} disappears",
         }
         if self.source == "input":
             if self.target == "wheel":
@@ -158,17 +176,29 @@ class ConditionRuntime:
         engine itself -- they never hold here; treat them as not holding.
         For screen rules each watched region is captured once; with several
         rectangles the modes compose as expected: ``image_found``/
-        ``region_changed`` need *all* regions to hold, ``image_missing``
-        needs the template absent from *all* of them.
+        ``region_changed``/``color_present`` need *all* regions to hold,
+        ``image_missing``/``color_absent`` need the pattern/colour absent from
+        *all* of them.
         """
         config = self.condition
         if config.source != "screen":
             return False
-        from core.screen_watch import grab_region, load_template, match_template
+        from core.screen_watch import (
+            color_pixel_ratio,
+            grab_region,
+            load_template,
+            match_template,
+            parse_hex_color,
+        )
         template = None
-        if config.mode != "region_changed":
+        target_rgb = None
+        if config.mode in ("image_found", "image_missing"):
             template = load_template(config.template_path)
             if template is None:
+                return False
+        elif config.mode in ("color_present", "color_absent"):
+            target_rgb = parse_hex_color(config.color_hex)
+            if target_rgb is None:
                 return False
         results: list[bool] = []
         for index, rect in enumerate(config.watch_regions):
@@ -176,6 +206,10 @@ class ConditionRuntime:
             if config.mode == "region_changed":
                 detector = self.detectors[index]
                 results.append(bool(detector.poll(frame)))  # type: ignore[union-attr]
+            elif target_rgb is not None:
+                ratio = color_pixel_ratio(frame, target_rgb, config.color_tolerance)
+                present = ratio >= config.color_ratio
+                results.append(present if config.mode == "color_present" else not present)
             else:
                 assert template is not None
                 found = match_template(frame, template, config.confidence)
