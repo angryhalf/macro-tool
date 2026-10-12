@@ -237,15 +237,21 @@ class ConditionEditor(QWidget):
             self._set_row_visible(row, is_color)
 
     def _set_row_visible(self, row: int, visible: bool) -> None:
-        """Toggle every item of a :class:`QFormLayout` row, label included."""
-        for column in range(self._form.columnCount()):
-            item = self._form.itemAt(row, column)
+        """Toggle every item of a :class:`QFormLayout` row, label included.
+
+        ``QFormLayout`` exposes no ``columnCount()``; its rows are addressed
+        through the role-based API (``QFormLayout.LabelRole`` /
+        ``QFormLayout.FieldRole`` -- enum members live on the class, not on
+        layout instances).
+        """
+        for role in (QFormLayout.LabelRole, QFormLayout.FieldRole):
+            item = self._form.itemAt(row, role)
             if item is None:
                 continue
             widget = item.widget()
             if widget is not None:
                 widget.setVisible(visible)
-            elif hasattr(item, "layout") and item.layout() is not None:
+            elif item.layout() is not None:
                 for i in range(item.layout().count()):
                     sub = item.layout().itemAt(i)
                     sub_widget = sub.widget() if sub is not None else None
