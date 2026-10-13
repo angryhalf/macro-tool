@@ -50,9 +50,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.conditions import ScreenCondition
-from app.settings import CONDITION_ACTION_KINDS, ActionConfig, MacroConfig, new_macro_uid
-from services.input import (
+from models.condition import ScreenCondition
+from models.macro import (
+    CONDITION_ACTION_KINDS,
+    LOOP_ACTION_KINDS,
+    ActionConfig,
+    MacroConfig,
+    new_macro_uid,
+)
+from automation.input import (
     InputRecorder,
     current_mouse_position,
     describe_hotkey,
@@ -96,8 +102,6 @@ _CONDITION_PAGE_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_tri
 #: Kinds that jump back/forward to their counterpart (kept in sync with the
 #: settings/engine constant of the same name); they have no keyboard/mouse
 #: fields of their own.
-from app.settings import LOOP_ACTION_KINDS  # noqa: E402
-
 BUTTONS = ["left", "right", "middle"]
 
 _KEY_FIELD_HINT = "One press of the key when the macro runs (e.g. a, space, f5, enter)."

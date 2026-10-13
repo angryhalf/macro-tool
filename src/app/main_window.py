@@ -24,15 +24,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.settings import (
+from persistence.settings_store import (
     AppSettings,
     MacroConfig,
     load_settings,
     rename_in_settings,
     save_settings,
 )
-from core.macro_engine import MacroEngine
-from services.input import describe_hotkey
+from engine.macro_engine import MacroEngine
+from automation.input import describe_hotkey
 from ui.macros_tab import MacrosTab
 from ui.settings_tab import SettingsTab
 

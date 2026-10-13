@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.settings import (
+from persistence.settings_store import (
     MacroConfig,
     import_macro_files,
     new_macro_uid,

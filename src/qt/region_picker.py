@@ -7,7 +7,7 @@ Usage::
 The picker shows a frozen screenshot of the entire virtual desktop (all
 monitors) in a frameless window and lets the user drag a rubber-band
 selection.  Coordinates returned are global screen coordinates, which is
-what :mod:`services.screen_capture` and the condition engine expect.
+what :mod:`qt.capture` and the condition engine expect.
 """
 
 from __future__ import annotations

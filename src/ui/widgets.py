@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services.input import describe_hotkey
-from services.screen_capture import grab_primary_screen_via_qt
+from automation.input import describe_hotkey
+from qt.capture import grab_primary_screen_via_qt
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +157,8 @@ def crop_and_save_template(parent: QWidget | None, save_path: str) -> bool:
 
     Returns True when a crop was captured and written to *save_path*.
     """
-    from services.region_picker import RegionPickerDialog
-    from services.screen_capture import save_template
+    from qt.capture import save_template
+    from qt.region_picker import RegionPickerDialog
 
     rect = RegionPickerDialog.pick(parent)
     if rect is None:

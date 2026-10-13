@@ -28,7 +28,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.conditions import ScreenCondition
+from models.condition import ScreenCondition
+from persistence.paths import TEMPLATES_DIR
 from ui.widgets import crop_and_save_template
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,6 @@ MODE_LABELS: dict[str, str] = {
 #: Modes whose rule is driven by a target colour instead of a template image.
 COLOR_MODES = ("color_present", "color_absent")
 
-TEMPLATES_DIR = Path("templates")
 
 
 def _normalize_hex(text: str) -> str:

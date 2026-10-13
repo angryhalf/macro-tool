@@ -29,9 +29,10 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from app.conditions import ConditionRuntime, ScreenCondition
-from app.settings import ActionConfig, AppSettings, MacroConfig
-from services.input import HotkeyManager, InputRecorder, perform_action
+from automation.input import HotkeyManager, InputRecorder, perform_action
+from engine.condition_runtime import ConditionRuntime
+from models.condition import ScreenCondition
+from models.macro import ActionConfig, AppSettings, MacroConfig
 
 logger = logging.getLogger(__name__)
 
