@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from automation.input import describe_hotkey
+from automation import describe_hotkey
 from qt.capture import grab_primary_screen_via_qt
 
 logger = logging.getLogger(__name__)

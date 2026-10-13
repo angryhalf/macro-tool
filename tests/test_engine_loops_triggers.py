@@ -16,6 +16,7 @@ import time
 import pytest
 
 from engine.condition_runtime import ConditionRuntime
+from engine.macro_flow import MacroRunner
 from models.condition import ScreenCondition
 from models.macro import ActionConfig, MacroConfig, new_macro_uid
 from engine import macro_engine
@@ -137,7 +138,7 @@ def test_stray_markers_degrade_gracefully(recorder):
 
 
 def test_top_loop_frame_matches_innermost():
-    stack = MacroEngine._match_loop_markers(
+    stack = MacroRunner._match_loop_markers(
         (
             ActionConfig(kind="loop_start", amount=1),   # 0 outer
             ActionConfig(kind="key"),                    # 1
@@ -149,13 +150,13 @@ def test_top_loop_frame_matches_innermost():
     )
     assert len(stack) == 3  # sentinel + outer + inner
     inner, outer = stack[-1], stack[1]
-    assert MacroEngine._top_loop_frame(stack, 4) is inner
+    assert MacroRunner._top_loop_frame(stack, 4) is inner
     # Once the inner loop's budget is spent, its frame is skipped and the
     # outer ``loop_end`` resolves to the still-open outer frame.
     inner["completed"] = 1
-    assert MacroEngine._top_loop_frame(stack, 5) is outer
+    assert MacroRunner._top_loop_frame(stack, 5) is outer
     # A stray index no open frame covers -> None (sentinel alone).
-    assert MacroEngine._top_loop_frame([stack[0]], 6) is None
+    assert MacroRunner._top_loop_frame([stack[0]], 6) is None
 
 
 # ---------------------------------------------------------------------------

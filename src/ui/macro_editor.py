@@ -58,7 +58,7 @@ from models.macro import (
     MacroConfig,
     new_macro_uid,
 )
-from automation.input import (
+from automation import (
     InputRecorder,
     current_mouse_position,
     describe_hotkey,

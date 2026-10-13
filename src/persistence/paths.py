@@ -5,7 +5,7 @@ code (``Path("data") / "settings.json"`` in settings, ``Path("templates")`` in
 the condition editor, ``Path("logs")`` in main), which broke whenever the app
 was launched from a different working directory.  Anchoring them at the
 project root -- derived from this file's location -- makes every entry point
-(``python src/main.py``, ``python -m src.main``, tests) behave identically.
+(``fishing-macro``, ``python -m app``, tests) behave identically.
 """
 
 from __future__ import annotations

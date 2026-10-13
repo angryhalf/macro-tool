@@ -39,7 +39,7 @@ from collections.abc import Callable
 
 from automation.hotkeys import HotkeyManager
 from automation.recorder import InputRecorder
-from automation.synthesis import perform_action as _synthesis_perform_action
+from automation.synthesis import perform_action
 from engine import condition_monitor
 from engine.condition_runtime import ConditionRuntime
 from engine.macro_flow import MacroRunner
@@ -55,10 +55,12 @@ def _resolve_perform(engine: "MacroEngine", action: ActionConfig, cancel: Callab
 
     Resolved lazily on every call so tests (and embedders) can simply assign
     ``engine.perform_action = fake`` -- including after the runner was built.
-    ``getattr`` with a default falls back to real pynput synthesis when the
-    class-level hook is left as ``None``.
+    ``getattr`` with a default falls back to the module-level
+    :func:`perform_action` (real pynput synthesis) when the class-level hook
+    is left as ``None``; the lookup happens at call time so monkeypatching
+    this module's ``perform_action`` attribute also takes effect.
     """
-    perform = getattr(engine, "perform_action", None) or _synthesis_perform_action
+    perform = getattr(engine, "perform_action", None) or perform_action
     perform(action, cancel=cancel)
 
 

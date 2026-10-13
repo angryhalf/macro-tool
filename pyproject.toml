@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fishing-macro"
+version = "0.1.0"
+description = "Hotkey-driven macro recorder/player with screen-based trigger conditions (PySide6 GUI)."
+readme = "README.md"
+requires-python = ">=3.11"
+# Runtime dependencies are kept in sync with requirements.txt; install the
+# project itself with `pip install -e .` to pull them in transitively.
+dependencies = [
+    "PySide6>=6.6",
+    "opencv-python>=4.8",
+    "numpy>=1.26",
+    "mss>=9.0",
+    "pynput>=1.7",
+]
+
+[project.scripts]
+# After `pip install -e .`, run the app from anywhere with a single command.
+fishing-macro = "app.__main__:main"
+
+# The importable packages live under src/ and are imported by their bare
+# names (`app`, `automation`, `engine`, ...).  `package_dir` maps that root
+# onto src/ so an editable install puts every package on sys.path without
+# any sys.path hacks at runtime.
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

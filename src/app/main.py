@@ -1,4 +1,13 @@
-"""Application entry point for the macro tool."""
+"""Application entry point for the macro tool.
+
+This module is the canonical home of ``main()``.  It can be reached in three
+ways, all equivalent once the project is installed (``pip install -e .``):
+
+* the ``fishing-macro`` console script declared in ``pyproject.toml``
+* ``python -m app`` (via ``app/__init__.py`` re-exporting ``main``)
+* ``python src/app/main.py`` (the sys.path bootstrap below makes the bare
+  package imports work without an install step)
+"""
 
 from __future__ import annotations
 
@@ -8,14 +17,19 @@ import logging.handlers
 import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
-
-# The project uses absolute imports (`app.*`, `engine.*`, `models.*`, ...).
-# Insert the package directory on ``sys.path`` so both `python src/main.py` and
-# `python -m src.main` work as documented entry points.
-_SRC_DIR = Path(__file__).resolve().parent
+# When this file is executed directly (``python src/app/main.py``), Python puts
+# ``src/app`` -- not the package root -- on sys.path, so the absolute imports
+# below would fail unless the project has been installed.  Inserting ``src/``
+# keeps that invocation working as a zero-install convenience; installed
+# environments already have the packages on sys.path and skip this entirely.
+_SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(_SRC_DIR))
+    try:
+        import app  # noqa: F401  (already importable -> installed or -m run)
+    except ImportError:
+        sys.path.insert(0, str(_SRC_DIR))
+
+from PySide6.QtWidgets import QApplication
 
 from app.main_window import MainWindow
 from persistence.paths import DEFAULT_SETTINGS_PATH, LOG_PATH

@@ -45,14 +45,19 @@ connection, and root/uinput access for keyboard/mouse control).
 ```bash
 python -m venv .venv
 .venv\Scripts\activate        # Windows  (source .venv/bin/activate on Linux/macOS)
-pip install -r requirements.txt
+pip install -e .              # installs the app + all dependencies from pyproject.toml
 ```
+
+(``pip install -r requirements.txt`` still works if you only want the
+dependencies, but the editable install is what enables the commands below.)
 
 ## Usage
 
 ```bash
-python -m src.main            # or: python src/main.py
-python -m src.main --verbose  # also log to the console
+fishing-macro                 # console script from the editable install
+fishing-macro --verbose       # also log to the console
+python -m app                 # equivalent, no console script needed
+python src/app/main.py        # zero-install fallback straight from a checkout
 ```
 
 1. **Macros tab** – *Add macro*, define actions (press keys, clicks, waits…),
@@ -78,10 +83,14 @@ python -m src.main --verbose  # also log to the console
 ## Project layout
 
 ```
-src/
-├── main.py                 # entry point (logging, QApplication)
+pyproject.toml                # packaging metadata, deps, `fishing-macro` script
+src/                          # import root: every package below is imported
+                              # by its bare name (`app`, `engine`, ...) once
+                              # the project is installed (or via conftest.py)
 ├── app/
-│   └── main_window.py      # single QMainWindow wiring tabs ↔ engines
+│   ├── main.py               # entry point (logging, QApplication); also
+│   │                         # runnable as `python -m app` / console script
+│   └── main_window.py        # single QMainWindow wiring tabs ↔ engines
 ├── models/                 # pure domain dataclasses, no IO or Qt
 │   ├── macro.py            # ActionConfig, MacroConfig, AppSettings
 │   └── condition.py        # ScreenCondition (image/colour/change rules)

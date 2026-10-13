@@ -1,13 +1,19 @@
-"""Pytest bootstrap: make the ``src``-rooted packages importable everywhere.
+"""Pytest bootstrap for zero-install test runs.
 
-The app itself runs with ``src`` on sys.path (see src/main.py); tests mirror
-that here so ``import models.macro`` works from any invocation directory and
-CI does not need a separate install step.
+The supported way to run tests is against an editable install
+(``pip install -e .``), which puts every package on sys.path automatically.
+This file only covers the fallback case where the project has *not* been
+installed: it mirrors what the install would do by putting ``src/`` on
+sys.path, so ``import models.macro`` works from any invocation directory.
+When the packages are already importable (editable install active), this is a
+no-op.
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parent / "src"
-if str(SRC) not in sys.path:
+
+if importlib.util.find_spec("models") is None:
     sys.path.insert(0, str(SRC))
