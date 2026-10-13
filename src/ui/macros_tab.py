@@ -54,7 +54,7 @@ class MacrosTab(QWidget):
         engine=None,
         parent: QWidget | None = None,
     ) -> None:
-        """*engine* is the :class:`~core.macro_engine.MacroEngine` (optional so
+        """*engine* is the :class:`~engine.macro_engine.MacroEngine` (optional so
         the tab stays usable in tests without one); it only provides live
         run-state info shown in the table (e.g. which macros are running)."""
         super().__init__(parent)

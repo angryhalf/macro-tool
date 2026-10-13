@@ -10,16 +10,15 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-# The project uses absolute imports (`app.*`, `core.*`, ...).  Insert the
-# package directory on ``sys.path`` so both `python src/main.py` and
+# The project uses absolute imports (`app.*`, `engine.*`, `models.*`, ...).
+# Insert the package directory on ``sys.path`` so both `python src/main.py` and
 # `python -m src.main` work as documented entry points.
 _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from app.main_window import MainWindow
-
-LOG_PATH = Path("logs") / "macro.log"
+from persistence.paths import DEFAULT_SETTINGS_PATH, LOG_PATH
 
 
 def configure_logging(verbose: bool) -> None:
@@ -48,7 +47,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--settings",
         type=Path,
-        default=Path("data/settings.json"),
+        default=DEFAULT_SETTINGS_PATH,
         help="Path to the settings JSON file (default: data/settings.json)",
     )
     parser.add_argument("--verbose", action="store_true", help="Also print logs to stderr")

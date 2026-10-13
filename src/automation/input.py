@@ -160,7 +160,7 @@ def perform_action(action: ActionConfig, cancel: Callable[[], bool] | None = Non
 
     Flow-control kinds (``wait_for``, ``stop_trigger``, ``start_trigger``,
     ``loop_start``, ``loop_end``) are handled by
-    :class:`~core.macro_engine.MacroEngine` itself and never reach real input
+    :class:`~engine.macro_engine.MacroEngine` itself and never reach real input
     synthesis; they are accepted here as no-ops so ad-hoc action lists can be
     played through this function without special-casing.
     """

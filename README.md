@@ -81,21 +81,30 @@ python -m src.main --verbose  # also log to the console
 src/
 ├── main.py                 # entry point (logging, QApplication)
 ├── app/
-│   ├── settings.py         # frozen dataclasses + JSON load/save
 │   └── main_window.py      # single QMainWindow wiring tabs ↔ engines
-├── core/
+├── models/                 # pure domain dataclasses, no IO or Qt
+│   ├── macro.py            # ActionConfig, MacroConfig, AppSettings
+│   └── condition.py        # ScreenCondition (image/colour/change rules)
+├── persistence/            # on-disk format lives here, not in models
+│   ├── paths.py            # project-rooted data/templates/logs paths
+│   └── settings_store.py   # JSON load/save, migrations, import/export
+├── engine/
 │   ├── macro_engine.py     # threaded macro playback, global hotkeys, stop-all
-│   └── screen_watch.py     # template match & change detection primitives
-├── services/
-│   ├── input.py              # pynput keyboard/mouse synthesis + global hotkeys
-│   ├── screen_capture.py     # mss/OpenCV capture helpers
-│   └── region_picker.py      # fullscreen drag-select overlay
+│   └── condition_runtime.py# background screen watcher for trigger actions
+├── automation/
+│   └── input.py            # pynput keyboard/mouse synthesis + hotkey parsing
+├── vision/
+│   └── vision.py           # mss capture + OpenCV template/colour/change matching
+├── qt/                     # thin Qt-coupled helpers
+│   ├── capture.py          # fullscreen crop-capture for templates
+│   └── region_picker.py    # fullscreen drag-select overlay
 └── ui/
     ├── macros_tab.py       # macro list + run controls
     ├── macro_editor.py     # macro & action editor dialogs
     ├── condition_editor.py # screen-rule editor used by trigger actions
     ├── settings_tab.py     # global options
-    └── widgets.py          # HotkeyButton, template crop-capture, shared bits
+    └── widgets.py          # HotkeyButton and other shared bits
 templates/                  # captured template images
 data/settings.json          # persisted configuration
+logs/macro.log              # rotating log file (created at runtime)
 ```
