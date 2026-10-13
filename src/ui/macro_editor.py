@@ -50,9 +50,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.conditions import ScreenCondition
-from app.settings import CONDITION_ACTION_KINDS, ActionConfig, MacroConfig, new_macro_uid
-from services.input import (
+from models.condition import ScreenCondition
+from models.macro import (
+    CONDITION_ACTION_KINDS,
+    LOOP_ACTION_KINDS,
+    ActionConfig,
+    MacroConfig,
+    new_macro_uid,
+)
+from automation import (
     InputRecorder,
     current_mouse_position,
     describe_hotkey,
@@ -96,8 +102,6 @@ _CONDITION_PAGE_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_tri
 #: Kinds that jump back/forward to their counterpart (kept in sync with the
 #: settings/engine constant of the same name); they have no keyboard/mouse
 #: fields of their own.
-from app.settings import LOOP_ACTION_KINDS  # noqa: E402
-
 BUTTONS = ["left", "right", "middle"]
 
 _KEY_FIELD_HINT = "One press of the key when the macro runs (e.g. a, space, f5, enter)."
@@ -803,7 +807,7 @@ def _events_to_actions(events: list[tuple[float, str, dict]]) -> list[ActionConf
                 # semantic ``drag`` step (start -> end) instead of the raw
                 # mouse_down/move/mouse_up triple, which replays brittlely.
                 # NOTE: drag reuses amount/duration_ms for the end point --
-                # see ActionConfig's field-overloading warning in app.settings.
+                # see ActionConfig's field-overloading warning in models.macro.
                 actions.append(
                     ActionConfig(
                         kind="drag",

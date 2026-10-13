@@ -44,13 +44,31 @@ def _get_mss():
     return sct
 
 
-def grab_region(region: tuple[int, int, int, int]) -> np.ndarray:
-    """Capture a screen rectangle (left, top, width, height) as a BGR array."""
+def new_capture_session():
+    """Create a capture object exposing ``grab(rect_dict)`` for one thread.
+
+    Extracted from :func:`grab_region` so tests can inject a fake capture
+    backend; the default is a per-thread ``mss.mss()`` context (see the note
+    on ``_tls`` above).
+    """
+    return _get_mss()
+
+
+def grab_region(
+    region: tuple[int, int, int, int], capture: object | None = None
+) -> np.ndarray:
+    """Capture a screen rectangle (left, top, width, height) as a BGR array.
+
+    *capture* may be any object with a ``grab(rect)`` method returning raw
+    BGRA pixels (duck-compatible with ``mss.ScreenShot``); ``None`` uses the
+    thread-local mss context.
+    """
+    if capture is None:
+        capture = _get_mss()
     left, top, width, height = region
     if width <= 0 or height <= 0:
         raise ValueError(f"Invalid screen region: {region!r}")
-    sct = _get_mss()
-    shot = sct.grab({"left": left, "top": top, "width": width, "height": height})
+    shot = capture.grab({"left": left, "top": top, "width": width, "height": height})
     frame = np.array(shot, dtype=np.uint8)
     return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 

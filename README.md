@@ -39,20 +39,25 @@ the macro's actions in response.
 
 ## Installation
 
-Requires Python 3.11+ (Windows recommended; pynput needs root on Linux for
-keyboard/mouse control).
+Requires Python 3.11+ (Windows recommended; on Linux pynput needs an X
+connection, and root/uinput access for keyboard/mouse control).
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate        # Windows  (source .venv/bin/activate on Linux/macOS)
-pip install -r requirements.txt
+pip install -e .              # installs the app + all dependencies from pyproject.toml
 ```
+
+(``pip install -r requirements.txt`` still works if you only want the
+dependencies, but the editable install is what enables the commands below.)
 
 ## Usage
 
 ```bash
-python -m src.main            # or: python src/main.py
-python -m src.main --verbose  # also log to the console
+fishing-macro                 # console script from the editable install
+fishing-macro --verbose       # also log to the console
+python -m app                 # equivalent, no console script needed
+python src/app/main.py        # zero-install fallback straight from a checkout
 ```
 
 1. **Macros tab** – *Add macro*, define actions (press keys, clicks, waits…),
@@ -78,24 +83,37 @@ python -m src.main --verbose  # also log to the console
 ## Project layout
 
 ```
-src/
-├── main.py                 # entry point (logging, QApplication)
+pyproject.toml                # packaging metadata, deps, `fishing-macro` script
+src/                          # import root: every package below is imported
+                              # by its bare name (`app`, `engine`, ...) once
+                              # the project is installed (or via conftest.py)
 ├── app/
-│   ├── settings.py         # frozen dataclasses + JSON load/save
-│   └── main_window.py      # single QMainWindow wiring tabs ↔ engines
-├── core/
+│   ├── main.py               # entry point (logging, QApplication); also
+│   │                         # runnable as `python -m app` / console script
+│   └── main_window.py        # single QMainWindow wiring tabs ↔ engines
+├── models/                 # pure domain dataclasses, no IO or Qt
+│   ├── macro.py            # ActionConfig, MacroConfig, AppSettings
+│   └── condition.py        # ScreenCondition (image/colour/change rules)
+├── persistence/            # on-disk format lives here, not in models
+│   ├── paths.py            # project-rooted data/templates/logs paths
+│   └── settings_store.py   # JSON load/save, migrations, import/export
+├── engine/
 │   ├── macro_engine.py     # threaded macro playback, global hotkeys, stop-all
-│   └── screen_watch.py     # template match & change detection primitives
-├── services/
-│   ├── input.py              # pynput keyboard/mouse synthesis + global hotkeys
-│   ├── screen_capture.py     # mss/OpenCV capture helpers
-│   └── region_picker.py      # fullscreen drag-select overlay
+│   └── condition_runtime.py# background screen watcher for trigger actions
+├── automation/
+│   └── input.py            # pynput keyboard/mouse synthesis + hotkey parsing
+├── vision/
+│   └── vision.py           # mss capture + OpenCV template/colour/change matching
+├── qt/                     # thin Qt-coupled helpers
+│   ├── capture.py          # fullscreen crop-capture for templates
+│   └── region_picker.py    # fullscreen drag-select overlay
 └── ui/
     ├── macros_tab.py       # macro list + run controls
     ├── macro_editor.py     # macro & action editor dialogs
     ├── condition_editor.py # screen-rule editor used by trigger actions
     ├── settings_tab.py     # global options
-    └── widgets.py          # HotkeyButton, template crop-capture, shared bits
+    └── widgets.py          # HotkeyButton and other shared bits
 templates/                  # captured template images
 data/settings.json          # persisted configuration
+logs/macro.log              # rotating log file (created at runtime)
 ```

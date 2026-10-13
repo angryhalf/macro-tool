@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.settings import AppSettings
+from models.macro import AppSettings
 from ui.widgets import HotkeyButton
 
 

@@ -1,4 +1,9 @@
-"""Screen-capture helpers shared by the UI (thumbnails, region picker)."""
+"""Qt-based screen capture for the UI layer (thumbnails, region picker crops).
+
+Note this is *not* what the condition engine samples at runtime -- that uses
+the dependency-free mss path in :mod:`vision.vision`.  This module exists so
+UI code can grab pixels through Qt without extra native dependencies.
+"""
 
 from __future__ import annotations
 

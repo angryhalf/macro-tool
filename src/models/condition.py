@@ -15,15 +15,20 @@ from three sources, selected by the ``event`` field:
 ``wait_for`` / ``stop_trigger`` / ``start_trigger`` macro actions each embed
 one of these; while a macro runs, the engine's background monitor evaluates
 the armed rules automatically -- no separate watcher setup is needed.
+
+This module is pure data + parsing: it imports nothing from the rest of the
+project so every layer can depend on it without cycles.  The runtime
+bookkeeping (:class:`ConditionRuntime`) lives with the evaluation machinery
+in :mod:`engine.condition_runtime`, which *does* reach into
+:mod:`vision.vision` for capture and matching.
 """
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
-def _parse_event(event: str) -> tuple[str, str]:
+def parse_event(event: str) -> tuple[str, str]:
     """Split an ``event`` string into ``(source, target)``.
 
     ``""`` -> ``("screen", "")``; ``"key:a"`` -> ``("input", "a")``;
@@ -67,7 +72,7 @@ class ScreenCondition:
     """
 
     mode: str = "image_found"
-    #: Rule source selector -- see :func:`_parse_event`.
+    #: Rule source selector -- see :func:`parse_event`.
     event: str = ""
     template_path: str = ""
     confidence: float = 0.85
@@ -92,12 +97,12 @@ class ScreenCondition:
     @property
     def source(self) -> str:
         """Where this rule observes: ``screen`` | ``input`` | ``action``."""
-        return _parse_event(self.event)[0]
+        return parse_event(self.event)[0]
 
     @property
     def target(self) -> str:
         """Event subject for input/action rules (key name, button, kind...)."""
-        return _parse_event(self.event)[1]
+        return parse_event(self.event)[1]
 
     @property
     def watch_regions(self) -> list[tuple[int, int, int, int]]:
@@ -108,16 +113,17 @@ class ScreenCondition:
     def configured(self) -> bool:
         """True when the condition has everything needed to be evaluated."""
         source = self.source
-        if source == "input":
-            return bool(self.target)
-        if source == "action":
+        if source in ("input", "action"):
             return bool(self.target)
         if self.mode == "region_changed":
             return True
         if self.mode in ("color_present", "color_absent"):
-            from core.screen_watch import parse_hex_color  # local import: avoid cycles
-
-            return parse_hex_color(self.color_hex) is not None
+            # Local validation keeps this module dependency-free; the exact
+            # same grammar is implemented once in vision.vision.parse_hex_color.
+            cleaned = self.color_hex.strip().lstrip("#")
+            if len(cleaned) == 3:
+                cleaned = "".join(ch * 2 for ch in cleaned)
+            return len(cleaned) == 6 and all(c in "0123456789abcdefABCDEF" for c in cleaned)
         return bool(self.template_path)
 
     @property
@@ -143,75 +149,3 @@ class ScreenCondition:
             base = labels.get(self.mode, self.mode)
         extra = f", {len(self.all_regions) + 1} regions" if self.all_regions else ""
         return f"{base} ({self.poll_interval_ms} ms poll{extra})"
-
-
-@dataclass
-class ConditionRuntime:
-    """Mutable bookkeeping for one condition while it is being polled."""
-
-    condition: ScreenCondition
-    detectors: list[object | None] = field(default_factory=list)  # core.screen_watch.ChangeDetector, one per watched region
-    deadline_mono: float = field(default=0.0)
-
-    @classmethod
-    def create(cls, condition: ScreenCondition, timeout_s: float = 0.0) -> ConditionRuntime:
-        """Wrap *condition*, arming an optional wall-clock deadline."""
-        from core.screen_watch import ChangeDetector  # local import: avoid cycles
-
-        deadline = time.monotonic() + timeout_s if timeout_s > 0 else 0.0
-        detectors: list[object | None] = []
-        if condition.source == "screen" and condition.mode == "region_changed":
-            # One independent baseline per watched rectangle.
-            detectors = [ChangeDetector(condition.change_threshold) for _ in condition.watch_regions]
-        return cls(condition=condition, detectors=detectors, deadline_mono=deadline)
-
-    def expired(self) -> bool:
-        """True once the optional timeout has elapsed."""
-        return self.deadline_mono > 0 and time.monotonic() >= self.deadline_mono
-
-    def evaluate(self) -> bool:
-        """Report whether the rule currently holds.
-
-        Non-screen rules (user input / executed action) are sampled by the
-        engine itself -- they never hold here; treat them as not holding.
-        For screen rules each watched region is captured once; with several
-        rectangles the modes compose as expected: ``image_found``/
-        ``region_changed``/``color_present`` need *all* regions to hold,
-        ``image_missing``/``color_absent`` need the pattern/colour absent from
-        *all* of them.
-        """
-        config = self.condition
-        if config.source != "screen":
-            return False
-        from core.screen_watch import (
-            color_pixel_ratio,
-            grab_region,
-            load_template,
-            match_template,
-            parse_hex_color,
-        )
-        template = None
-        target_rgb = None
-        if config.mode in ("image_found", "image_missing"):
-            template = load_template(config.template_path)
-            if template is None:
-                return False
-        elif config.mode in ("color_present", "color_absent"):
-            target_rgb = parse_hex_color(config.color_hex)
-            if target_rgb is None:
-                return False
-        results: list[bool] = []
-        for index, rect in enumerate(config.watch_regions):
-            frame = grab_region(rect)
-            if config.mode == "region_changed":
-                detector = self.detectors[index]
-                results.append(bool(detector.poll(frame)))  # type: ignore[union-attr]
-            elif target_rgb is not None:
-                ratio = color_pixel_ratio(frame, target_rgb, config.color_tolerance)
-                present = ratio >= config.color_ratio
-                results.append(present if config.mode == "color_present" else not present)
-            else:
-                assert template is not None
-                found = match_template(frame, template, config.confidence)
-                results.append(found if config.mode == "image_found" else not found)
-        return all(results)
