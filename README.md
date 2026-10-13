@@ -39,8 +39,8 @@ the macro's actions in response.
 
 ## Installation
 
-Requires Python 3.11+ (Windows recommended; pynput needs root on Linux for
-keyboard/mouse control).
+Requires Python 3.11+ (Windows recommended; on Linux pynput needs an X
+connection, and root/uinput access for keyboard/mouse control).
 
 ```bash
 python -m venv .venv
