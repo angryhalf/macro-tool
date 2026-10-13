@@ -467,7 +467,7 @@ class MacroEngine:
             # pass over the action list runs, and any ``loop_start`` /
             # ``loop_end`` pair inside it repeats the steps between them.
             # (Legacy repeat/loops/interval_ms values were folded into a
-            # matching loop pair at load time -- see app.settings.)
+            # matching loop pair at load time -- see persistence.settings_store.)
             self._run_actions(macro.actions, token)
             if not token.cancelled:
                 logger.info("Macro '%s' finished", macro.name)

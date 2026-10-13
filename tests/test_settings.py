@@ -11,16 +11,18 @@ from dataclasses import replace
 
 import pytest
 
-from app.conditions import ScreenCondition
-from app.settings import (
-    SETTINGS_SCHEMA_VERSION,
+from models.condition import ScreenCondition
+from models.macro import (
     ActionConfig,
     AppSettings,
     MacroConfig,
+    new_macro_uid,
+)
+from persistence.settings_store import (
+    SETTINGS_SCHEMA_VERSION,
     import_macro_files,
     load_macro_json,
     load_settings,
-    new_macro_uid,
     rename_in_settings,
     save_macro_json,
     save_settings,

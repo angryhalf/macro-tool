@@ -330,3 +330,11 @@ def _to_plain(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _to_plain(v) for k, v in obj.items()}
     return obj
+
+
+def rename_in_settings(settings: AppSettings, old_name: str, new_name: str) -> AppSettings:
+    """Return settings with all references to a macro name updated."""
+    macros = tuple(
+        replace(m, name=new_name) if m.name == old_name else m for m in settings.macros
+    )
+    return replace(settings, macros=macros)

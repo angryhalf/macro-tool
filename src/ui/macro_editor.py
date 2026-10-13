@@ -807,7 +807,7 @@ def _events_to_actions(events: list[tuple[float, str, dict]]) -> list[ActionConf
                 # semantic ``drag`` step (start -> end) instead of the raw
                 # mouse_down/move/mouse_up triple, which replays brittlely.
                 # NOTE: drag reuses amount/duration_ms for the end point --
-                # see ActionConfig's field-overloading warning in app.settings.
+                # see ActionConfig's field-overloading warning in models.macro.
                 actions.append(
                     ActionConfig(
                         kind="drag",

@@ -13,7 +13,7 @@ JSON (de)serialisation and document migration live in
 from __future__ import annotations
 
 import uuid as _uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from models.condition import ScreenCondition
 
@@ -108,9 +108,3 @@ class AppSettings:
     macros: tuple[MacroConfig, ...] = ()
     stop_hotkey: str = "f8"
     execution_delay_ms: int = 500  # countdown before a macro starts, to allow focusing the target window
-
-
-def rename_in_settings(settings: AppSettings, old_name: str, new_name: str) -> AppSettings:
-    """Return settings with all references to a macro name updated."""
-    macros = tuple(replace(m, name=new_name) if m.name == old_name else m for m in settings.macros)
-    return replace(settings, macros=macros)

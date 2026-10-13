@@ -287,7 +287,7 @@ class ConditionEditor(QWidget):
         """Grab the dominant colour of a user-dragged rectangle on screen."""
         from PySide6.QtWidgets import QMessageBox
 
-        from services.region_picker import RegionPickerDialog
+        from qt.region_picker import RegionPickerDialog
         from ui.widgets import grab_screen_for_crop
 
         try:
@@ -357,7 +357,7 @@ class ConditionEditor(QWidget):
     def _pick_region(self) -> None:
         from PySide6.QtWidgets import QMessageBox
 
-        from services.region_picker import RegionPickerDialog
+        from qt.region_picker import RegionPickerDialog
 
         try:
             rect = RegionPickerDialog.pick(self)
