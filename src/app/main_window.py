@@ -24,12 +24,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from models.macro import AppSettings, MacroConfig
-from persistence.settings_store import load_settings, rename_in_settings, save_settings
-from engine.macro_engine import MacroEngine
-from automation import describe_hotkey
-from ui.macros_tab import MacrosTab
-from ui.settings_tab import SettingsTab
+from components.macro.macro import AppSettings, MacroConfig
+from components.macro.store import load_settings, rename_in_settings, save_settings
+from components.playback.macro_engine import MacroEngine
+from components.input import describe_hotkey
+from components.macro_list_tab import MacroListTab
+from components.settings_tab import SettingsTab
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class MainWindow(QMainWindow):
         self.engine_state_changed.connect(self._refresh_status)
 
         # -- tabs ------------------------------------------------------
-        self.macros_tab = MacrosTab(
+        self.macro_list_tab = MacroListTab(
             self._on_macros_changed,
             self._run_macro,
             self._stop_macro,
@@ -67,7 +67,7 @@ class MainWindow(QMainWindow):
         self.settings_tab = SettingsTab(self._on_global_settings_changed)
 
         tabs = QTabWidget()
-        tabs.addTab(self.macros_tab, "Macros")
+        tabs.addTab(self.macro_list_tab, "Macros")
         tabs.addTab(self.settings_tab, "Settings")
 
         # -- top bar ---------------------------------------------------
@@ -105,7 +105,7 @@ class MainWindow(QMainWindow):
     # Settings plumbing
     # ------------------------------------------------------------------
     def _push_settings_to_ui(self) -> None:
-        self.macros_tab.set_macros(list(self._settings.macros))
+        self.macro_list_tab.set_macros(list(self._settings.macros))
         self.settings_tab.load(self._settings)
 
     def _update_settings(self, **changes) -> None:
