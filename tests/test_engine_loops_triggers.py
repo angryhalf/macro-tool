@@ -15,12 +15,12 @@ import time
 
 import pytest
 
-from engine.condition_runtime import ConditionRuntime
-from engine.macro_flow import MacroRunner
-from models.condition import ScreenCondition
-from models.macro import ActionConfig, MacroConfig, new_macro_uid
-from engine import macro_engine
-from engine.macro_engine import ExecutionToken, MacroEngine
+from components.playback.condition_runtime import ConditionRuntime
+from components.playback.macro_flow import MacroRunner
+from components.macro.condition import ScreenCondition
+from components.macro.macro import ActionConfig, MacroConfig, new_macro_uid
+from components.playback import macro_engine
+from components.playback.macro_engine import ExecutionToken, MacroEngine
 
 
 def patch_screen_eval(monkeypatch, holds):

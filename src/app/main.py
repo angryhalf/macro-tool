@@ -32,7 +32,7 @@ if str(_SRC_DIR) not in sys.path:
 from PySide6.QtWidgets import QApplication
 
 from app.main_window import MainWindow
-from persistence.paths import DEFAULT_SETTINGS_PATH, LOG_PATH
+from common.paths import SETTINGS_PATH, LOG_PATH
 
 
 def configure_logging(verbose: bool) -> None:
@@ -61,7 +61,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--settings",
         type=Path,
-        default=DEFAULT_SETTINGS_PATH,
+        default=SETTINGS_PATH,
         help="Path to the settings JSON file (default: data/settings.json)",
     )
     parser.add_argument("--verbose", action="store_true", help="Also print logs to stderr")
