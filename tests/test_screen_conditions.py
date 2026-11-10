@@ -10,9 +10,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from engine.condition_runtime import ConditionRuntime
-from models.condition import ScreenCondition
-from vision.vision import ChangeDetector, match_template, region_change_score
+from components.playback.condition_runtime import ConditionRuntime
+from components.macro.condition import ScreenCondition
+from components.screen_watch.vision import ChangeDetector, match_template, region_change_score
 
 
 def gradient_frame(width: int = 64, height: int = 48) -> np.ndarray:
