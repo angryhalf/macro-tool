@@ -11,12 +11,14 @@ it stays unit-testable.
 
 ```
 app/                 composition root (Qt shell, logging, entry point)
- ├─ components/ui/           Qt widgets (tabs, editor dialogs, widgets/)
+ ├─ components/ui/           generic Qt widgets (HotkeyButton, capture glue)
+ ├─ components/macro_editor/ editor dialogs package (action / macro / recorder)
  ├─ components/playback/     engine: threads, tokens, condition monitor
  ├─ components/input/        pynput glue: hotkeys, synthesis, recording
  ├─ components/screen_watch/ OpenCV/mss vision helpers
  ├─ components/capture/      region picker & template crop tools
  └─ components/macro/        pure domain models + JSON persistence
+                              + recording→actions conversion
 common/              paths, shared event-name helpers
 data/                runtime state (settings.json, logs/, templates/, exports/)
 ```
@@ -25,11 +27,11 @@ data/                runtime state (settings.json, logs/, templates/, exports/)
 
 | Layer | Packages | May import |
 |---|---|---|
-| Domain | `components.macro` (`macro.py`, `condition.py`) | stdlib only |
+| Domain | `components.macro` (`macro.py`, `condition.py`, `recording.py`) | stdlib only |
 | Persistence | `components.macro.store` | domain, `common.paths` |
 | Engine | `components.playback` | domain, input, screen_watch, common |
 | IO adapters | `components.input`, `components.screen_watch`, `components.capture` | domain, common |
-| UI | `components.ui.*`, `app` | everything above |
+| UI | `components.ui.*`, `components.macro_editor.*`, top-level tabs, `app` | everything above |
 
 ## Key runtime objects
 

@@ -23,7 +23,7 @@ dependencies = [
 fishing-macro = "app.__main__:main"
 
 # The importable packages live under src/ and are imported by their bare
-# names (`app`, `automation`, `engine`, ...).  `package_dir` maps that root
+# names (`app`, `components`, `common`).  `package_dir` maps that root
 # onto src/ so an editable install puts every package on sys.path without
 # any sys.path hacks at runtime.
 [tool.setuptools]

@@ -31,10 +31,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from components.macro.macro import MacroConfig, new_macro_uid
 from components.macro.store import (
-    MacroConfig,
     import_macro_files,
-    new_macro_uid,
     save_macro_json,
 )
 from components.macro_editor import MacroEditorDialog

@@ -12,7 +12,7 @@ there are no `sys.path` hacks at runtime.
 | `src/app/` | Application shell (entry point, main window) |
 | `src/components/` | Feature components (see below) |
 | `src/common/` | Shared code used across components (paths, event helpers) |
-| `tests/` | pytest suite (`test_settings`, `test_screen_conditions`, `test_engine_loops_triggers`) |
+| `tests/` | pytest suite (`test_settings`, `test_screen_conditions`, `test_engine_loops_triggers`, `test_recording`) |
 | `data/general/` | App state: `settings.json`, rotating logs in `logs/` |
 | `data/macros/` | Macro data: captured `templates/*.png`, `exports/*.json` |
 | `docs/` | Docs for agents (`general/`, `macros/`) |
@@ -38,6 +38,10 @@ there are no `sys.path` hacks at runtime.
   migrations (`_migrate_legacy_actions`, `_migrate_legacy_conditions`),
   single-macro export/import (`save_macro_json`, `load_macro_json`,
   `import_macro_files`), `rename_in_settings`.
+- `recording.py` — `events_to_actions`: coalesce a recorded input event
+  stream (timestamped key/button/move/scroll events) into compact macro
+  steps (press vs hold, click vs drag, waits).  Pure logic, no Qt/pynput,
+  so it is unit-tested headless by `tests/test_recording.py`.
 
 ## `src/components/playback/` — engine
 
@@ -80,21 +84,27 @@ detection, region capture helpers.
 - `capture.py` — crop-and-save the selected region as a template PNG into
   `data/macros/templates/`.
 
-## `src/components/ui/` + top-level widgets
+## `src/components/ui/` + editor package + top-level widgets
 
-Qt UI.  Feature dialogs currently sit directly under `components/`
-(`macro_editor.py`, `condition_editor.py`, `macro_list_tab.py`,
-`settings_tab.py`); `ui/widgets.py` holds small shared widgets (key-capture
-button, region spinners, etc.).  When adding new UI files prefer
-`components/ui/`.
+Qt UI.  The editor dialogs live in the `components/macro_editor/` package
+(`action_editor.py`, `recorder_dialog.py`, `macro_editor.py`, re-exported
+by its `__init__.py` so `from components.macro_editor import
+MacroEditorDialog` keeps working); the remaining feature dialogs
+(`condition_editor.py`, `macro_list_tab.py`, `settings_tab.py`) sit directly
+under `components/`.  `ui/widgets.py` holds small shared widgets
+(key-capture button, region spinners, etc.).  When adding new UI files prefer
+`components/ui/` (generic widgets) or an editor package module (dialogs).
 
 - `macro_list_tab.py` — macro table: enable checkbox, run/stop, edit, delete,
   export/import, live status column.
-- `macro_editor.py` — dialog: metadata (name/hotkey), ordered action list with
-  add/reorder, record mode, per-kind parameter editors.
-- `condition_editor.py` — rule builder: source (screen/input/action), mode,
+- `macro_editor/` — the editor dialogs package: `action_editor.py`
+  (`ActionEditorDialog`, one step of the list), `recorder_dialog.py`
+  (`MacroRecorderDialog`, whole-session input recording), `macro_editor.py`
+  (`MacroEditorDialog`, macro metadata + ordered action table).
+- `condition_editor.py` — rule builder: mode (screen image/colour/change),
   region picker, template load/crop, confidence threshold, color eyedropper,
-  poll interval.
+  poll interval.  Fields it does not expose (input/action rule sources,
+  extra watched regions) are preserved across edits.
 - `settings_tab.py` — app-wide settings (global stop hotkey, defaults).
 
 ## `src/common/`

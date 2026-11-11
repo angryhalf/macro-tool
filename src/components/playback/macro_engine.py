@@ -289,11 +289,7 @@ class MacroEngine:
             }
 
     def record_block_reason(self, token: ExecutionToken, reason: str | None) -> None:
-        """Store which rule currently blocks *token* (engine-lock protected).
-
-        Public because the worker (MacroRunner) reports through it; formerly
-        the private ``_record_block_reason``.
-        """
+        """Store which rule currently blocks *token* (engine-lock protected)."""
         macro = token.macro
         if macro is None:
             return
@@ -301,9 +297,6 @@ class MacroEngine:
             stats = self._stats.get(macro.uid or macro.name)
             if stats is not None:
                 stats.blocked_by = reason
-
-    # Backwards-compatible alias for the former private name.
-    _record_block_reason = record_block_reason
 
     def _finish(self, token: ExecutionToken, macro_name: str | None = None) -> None:
         with self._lock:
@@ -357,9 +350,6 @@ class MacroEngine:
                 logger.exception("Could not start the user-input watcher")
         elif not needed and recorder is not None and recorder.running:
             recorder.stop()
-
-    # Alias kept for the previous private name.
-    _sync_input_watch = sync_input_watch
 
     def _bump_matching_tokens(self, event: str) -> None:
         """Record *event* (``key:<name>`` / ``mouse:<button>`` / ``wheel``).
@@ -491,7 +481,7 @@ class MacroEngine:
         """
         if token.macro is None:
             return
-        reason = MacroRunner._first_blocking_reason(token)
+        reason = condition_monitor.first_blocking_reason(token)
         self.record_block_reason(token, reason)
 
     @staticmethod

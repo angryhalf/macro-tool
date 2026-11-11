@@ -34,8 +34,8 @@ the macro's actions in response.
   input recorder (drag gestures are synthesized into single `drag` steps)
 - Status bar shows live per-macro stats: loops completed and which trigger
   rule currently blocks a running macro ("why did my macro silently stop?")
-- Settings persisted to `data/settings.json`; logs written to a rotating
-  `logs/macro.log` (5 × 1 MiB)
+- Settings persisted to `data/general/settings.json`; logs written to a
+  rotating `data/general/logs/macro.log` (5 × 1 MiB)
 
 ## Installation
 
@@ -85,35 +85,38 @@ python src/app/main.py        # zero-install fallback straight from a checkout
 ```
 pyproject.toml                # packaging metadata, deps, `fishing-macro` script
 src/                          # import root: every package below is imported
-                              # by its bare name (`app`, `engine`, ...) once
-                              # the project is installed (or via conftest.py)
+                              # by its bare name (`app`, `components`, `common`)
+                              # once the project is installed (or via conftest.py)
 ├── app/
 │   ├── main.py               # entry point (logging, QApplication); also
 │   │                         # runnable as `python -m app` / console script
 │   └── main_window.py        # single QMainWindow wiring tabs ↔ engines
-├── models/                 # pure domain dataclasses, no IO or Qt
-│   ├── macro.py            # ActionConfig, MacroConfig, AppSettings
-│   └── condition.py        # ScreenCondition (image/colour/change rules)
-├── persistence/            # on-disk format lives here, not in models
-│   ├── paths.py            # project-rooted data/templates/logs paths
-│   └── settings_store.py   # JSON load/save, migrations, import/export
-├── engine/
-│   ├── macro_engine.py     # threaded macro playback, global hotkeys, stop-all
-│   └── condition_runtime.py# background screen watcher for trigger actions
-├── automation/
-│   └── input.py            # pynput keyboard/mouse synthesis + hotkey parsing
-├── vision/
-│   └── vision.py           # mss capture + OpenCV template/colour/change matching
-├── qt/                     # thin Qt-coupled helpers
-│   ├── capture.py          # fullscreen crop-capture for templates
-│   └── region_picker.py    # fullscreen drag-select overlay
-└── ui/
-    ├── macros_tab.py       # macro list + run controls
-    ├── macro_editor.py     # macro & action editor dialogs
-    ├── condition_editor.py # screen-rule editor used by trigger actions
-    ├── settings_tab.py     # global options
-    └── widgets.py          # HotkeyButton and other shared bits
-templates/                  # captured template images
-data/settings.json          # persisted configuration
-logs/macro.log              # rotating log file (created at runtime)
+├── common/
+│   ├── paths.py              # project-rooted data/templates/logs paths
+│   └── events.py             # canonical key-name helpers (no Qt, no pynput)
+└── components/
+    ├── macro/                # pure domain models + JSON persistence
+    │   ├── macro.py          #   ActionConfig, MacroConfig, AppSettings
+    │   ├── condition.py      #   ScreenCondition rules (image/colour/change)
+    │   ├── store.py           #   settings load/save, migrations, import/export
+    │   └── recording.py       #   recorded events → action list (pure logic)
+    ├── playback/            # engine: threads, tokens, flow, condition monitor
+    ├── input/                # pynput glue: hotkeys, synthesis, recording, naming
+    ├── screen_watch/        # OpenCV/mss vision helpers
+    ├── capture/             # region picker & template crop tools
+    ├── ui/                  # reusable widgets (HotkeyButton, capture glue)
+    ├── macro_editor/         # action / macro / recorder dialogs (a package;
+    │                         # re-exports keep `components.macro_editor` stable)
+    ├── condition_editor.py  # screen-rule editor used by trigger actions
+    ├── macro_list_tab.py     # macro table + run controls
+    └── settings_tab.py      # global options
+data/general/                 # settings.json, rotating logs/
+data/macros/                  # templates/, exports/
+docs/                         # agent docs (general/, macros/)
+tests/                        # pytest suite (settings, screen conditions,
+                              # engine loops/triggers, recording conversion)
 ```
+
+Import roots are bare package names (`app`, `components`, `common`) — an
+editable install (`pip install -e .`) maps them onto `src/` via setuptools
+`package-dir`, so there are no `sys.path` hacks at runtime.

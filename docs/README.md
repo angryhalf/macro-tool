@@ -24,7 +24,7 @@ semantics.
 
 ## Quick orientation
 
-- **Structure**: `src/app` shell · `src/components/{macro,playback,input,screen_watch,capture,ui}` features · `src/common` shared · `tests/` headless pytest · `data/general` settings+logs · `data/macros` templates+exports.
+- **Structure**: `src/app` shell · `src/components/{macro,playback,input,screen_watch,capture,ui,macro_editor}` features · `src/common` shared · `tests/` headless pytest · `data/general` settings+logs · `data/macros` templates+exports.
 - **Golden rule of the domain**: a macro is a flat list of actions; loops and
   screen/input gating are expressed as dedicated action kinds, never as
   separate config trees.

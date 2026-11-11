@@ -1,29 +1,27 @@
-"""Macro editor: actions, stop-trigger/start-trigger flow steps and input recording.
+"""Editor for one macro action (the per-kind dialog page builder).
 
-* :class:`ActionEditorDialog` -- edit one step of a macro's action list.  On
-  top of the keyboard/mouse kinds there are five *flow-control* actions:
+:class:`ActionEditorDialog` edits a single :class:`~components.macro.macro.ActionConfig`.
+On top of the keyboard/mouse kinds there are five *flow-control* actions:
 
-  - **Wait until** (``wait_for``) blocks until its rule holds; the rule can
-    watch the screen, physical user input or another action executing
-    (built with :class:`ConditionEditor` from :mod:`components.condition_editor`).
-  - **Stop trigger** (``stop_trigger``) opens a stretch whose actions are held back
-    while the rule is present (or triggers them off on an event).
-  - **Start trigger** (``start_trigger``) closes that stretch (and can itself wait
-    for its rule before execution continues).
-  - **Loop start** / **Loop end** (``loop_start`` / ``loop_end``) repeat the
-    steps written between them -- looping is an action, not a general option.
+- **Wait until** (``wait_for``) blocks until its rule holds; the rule can
+  watch the screen, physical user input or another action executing
+  (built with :class:`ConditionEditor` from :mod:`components.condition_editor`).
+- **Stop trigger** (``stop_trigger``) opens a stretch whose actions are held back
+  while the rule is present (or triggers them off on an event).
+- **Start trigger** (``start_trigger``) closes that stretch (and can itself wait
+  for its rule before execution continues).
+- **Loop start** / **Loop end** (``loop_start`` / ``loop_end``) repeat the
+  steps written between them -- looping is an action, not a general option.
 
-  Every action type shows only the fields it needs, and *Record* buttons
-  capture live keyboard/mouse input through pynput.
-* :class:`MacroRecorderDialog` -- record an entire input session (keys,
-  clicks, moves, scrolls, timings) into an ordered action list in one go.
-* :class:`MacroEditorDialog` -- edit a macro: metadata (name, hotkey,
-  enabled), plus its action table.
+Every action type shows only the fields it needs, and *Record* buttons
+capture live keyboard/mouse input through pynput.  This module was split
+out of the former 1232-line ``macro_editor.py``; the whole-session recorder
+dialog lives in :mod:`components.macro_editor.recorder_dialog` and the
+macro-level dialog in :mod:`components.macro_editor.macro_editor`.
 """
 
 from __future__ import annotations
 
-import threading
 import time
 from typing import Callable
 
@@ -34,37 +32,25 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
     QSpinBox,
     QStackedWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from common.events import is_modifier_name
 from components.macro.condition import ScreenCondition
 from components.macro.macro import (
     CONDITION_ACTION_KINDS,
     LOOP_ACTION_KINDS,
     ActionConfig,
-    MacroConfig,
-    new_macro_uid,
-)
-from components.input import (
-    InputRecorder,
-    current_mouse_position,
-    describe_hotkey,
-    is_modifier_name,
-    sort_combo,
 )
 from components.condition_editor import ConditionEditor
-from components.ui.widgets import HotkeyButton
+from components.input import InputRecorder, current_mouse_position
 
 #: Human label -> action kind understood by ``components.input.synthesis.perform_action``
 #: (the last three are flow-control kinds handled by the macro engine).
@@ -87,11 +73,6 @@ ACTION_KINDS: dict[str, str] = {
     "Loop start": "loop_start",
     "Loop end": "loop_end",
 }
-
-#: Action kinds that gate execution on a rule (kept in sync with the
-#: engine's ``CONDITION_ACTION_KINDS``).  Rules can watch the screen,
-#: physical user input or other actions executing -- see ConditionEditor.
-_FLOW_KINDS: tuple[str, ...] = ("wait_for", "stop_trigger", "start_trigger")
 
 #: Kinds whose page is the shared condition editor and which store their
 #: rule in ``ActionConfig.condition``.
@@ -712,521 +693,3 @@ class ActionEditorDialog(QDialog):
             delay = getattr(self, f"_loop_{kind}_delay").value()
             return ActionConfig(kind=kind, duration_ms=delay)
         return ActionConfig(kind=kind)
-
-
-# ----------------------------------------------------------------------
-# Whole-macro recording
-# ----------------------------------------------------------------------
-def _canonical(name: str) -> str:
-    """Map pynput side-specific names onto their generic alias (ctrl_l->ctrl)."""
-    return name.rsplit("_", 1)[0] if name.endswith(("_l", "_r")) else name
-
-
-def _events_to_actions(events: list[tuple[float, str, dict]]) -> list[ActionConfig]:
-    """Coalesce timestamped raw events into compact macro steps.
-
-    Rules:
-    * key press+release <= 250 ms apart -> Press key; longer -> Hold key.
-    * consecutive mouse moves are thinned to the last position of each burst.
-    * button press/release pairs shorter than 300 ms with little movement
-      become Click; otherwise a single **Drag** step (start = press point,
-      end = release point) -- one semantic action instead of three raw ones.
-    * idle gaps between events become Wait steps (rounded to 10 ms).
-    """
-    actions: list[ActionConfig] = []
-    pending_wait = 0.0
-    previous_time = 0.0
-    opened: dict[str, tuple[float, dict]] = {}
-    move_buffer: tuple[int, int] | None = None
-
-    def flush_wait() -> None:
-        nonlocal pending_wait
-        ms = int(round(pending_wait * 100) * 10)
-        if ms >= 20:
-            actions.append(ActionConfig(kind="wait", duration_ms=ms))
-        pending_wait = 0.0
-
-    def flush_move() -> None:
-        nonlocal move_buffer
-        if move_buffer is not None:
-            actions.append(ActionConfig(kind="move", x=move_buffer[0], y=move_buffer[1]))
-            move_buffer = None
-
-    for stamp, kind, payload in events:
-        pending_wait += stamp - previous_time
-        previous_time = stamp
-
-        if kind == "move":
-            move_buffer = (payload["x"], payload["y"])
-            continue
-
-        if kind == "key_down":
-            flush_move()
-            flush_wait()
-            opened[f"key:{payload['key']}"] = (stamp, payload)
-            continue
-
-        if kind == "key_up":
-            pair = opened.pop(f"key:{payload['key']}", None)
-            if pair is None:
-                continue
-            held_ms = int((stamp - pair[0]) * 1000)
-            key = pair[1]["key"]
-            if held_ms <= 250:
-                actions.append(ActionConfig(kind="key", key=key))
-            else:
-                actions.append(ActionConfig(kind="hold_key", key=key, duration_ms=held_ms))
-            pending_wait = 0.0
-            continue
-
-        if kind == "scroll":
-            flush_move()
-            flush_wait()
-            actions.append(ActionConfig(kind="scroll", amount=payload["amount"]))
-            continue
-
-        if kind == "button_down":
-            flush_move()
-            flush_wait()
-            opened[f"button:{payload['button']}"] = (stamp, payload)
-            continue
-
-        if kind == "button_up":
-            pair = opened.pop(f"button:{payload['button']}", None)
-            if pair is None:
-                continue
-            held_ms = int((stamp - pair[0]) * 1000)
-            moved = abs(payload["x"] - pair[1]["x"]) + abs(payload["y"] - pair[1]["y"])
-            button = payload["button"]
-            if held_ms <= 300 and moved <= 5:
-                actions.append(ActionConfig(kind="click", button=button))
-            else:
-                # A press/release pair with travel is a drag gesture: emit one
-                # semantic ``drag`` step (start -> end) instead of the raw
-                # mouse_down/move/mouse_up triple, which replays brittlely.
-                # NOTE: drag reuses amount/duration_ms for the end point --
-                # see ActionConfig's field-overloading warning in components.macro.macro.
-                actions.append(
-                    ActionConfig(
-                        kind="drag",
-                        button=button,
-                        x=pair[1]["x"],
-                        y=pair[1]["y"],
-                        amount=payload["x"],
-                        duration_ms=payload["y"],
-                    )
-                )
-            pending_wait = 0.0
-            continue
-
-    flush_move()
-    flush_wait()
-    return actions
-
-
-class MacroRecorderDialog(QDialog):
-    """Record all keyboard/mouse input into an ordered action list.
-
-    Start the recording, work normally for a while, then press the global
-    stop hotkey (default ``F8``) or click *Stop*.  Raw events are shown live
-    and converted into compact macro steps when accepted.
-
-    The pynput listener threads never touch Qt widgets directly: stopping is
-    requested through the :attr:`_stop_recording_requested` signal, which is
-    delivered on the GUI thread.
-    """
-
-    #: Emitted from a pynput listener thread to request stopping on the GUI thread.
-    _stop_recording_requested = Signal()
-
-    def __init__(self, stop_hotkey: str = "f8", parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._stop_recording_requested.connect(self._stop)
-        self.setWindowTitle("Record macro inputs")
-        self.setMinimumSize(560, 400)
-
-        # Keep the *whole* normalized stop combination (e.g. ctrl+shift+s),
-        # not just its final key -- otherwise plain 's' would also stop.
-        self._stop_hotkey = sort_combo(stop_hotkey.strip().lower())
-        self._stop_combo: frozenset[str] = frozenset(
-            _canonical(part) for part in self._stop_hotkey.split("+") if part.strip()
-        )
-        self._pressed_keys: set[str] = set()
-        self._events: list[tuple[float, str, dict]] = []
-        self._lock = threading.Lock()
-        self._recorder: InputRecorder | None = None
-        self._started_at = 0.0
-
-        self._status = QLabel("Press Start, perform your inputs, then press the stop hotkey.")
-        self._status.setWordWrap(True)
-        self._count_label = QLabel("0 events")
-
-        self._table = QTableWidget(0, 3)
-        self._table.setHorizontalHeaderLabels(["#", "Time", "Event"])
-        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-
-        self._record_button = QPushButton("● Start recording")
-        self._record_button.clicked.connect(self._toggle)
-        top = QHBoxLayout()
-        top.addWidget(self._record_button)
-        top.addWidget(self._count_label)
-        top.addStretch()
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        if ok is not None:
-            ok.setText("Use recording")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-        layout = QVBoxLayout(self)
-        layout.addLayout(top)
-        layout.addWidget(self._status)
-        layout.addWidget(self._table)
-        layout.addWidget(buttons)
-
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.timeout.connect(self._refresh_table)
-
-    # ------------------------------------------------------------------
-    @property
-    def recording(self) -> bool:
-        return self._recorder is not None and self._recorder.running
-
-    def _toggle(self) -> None:
-        self._stop() if self.recording else self._start()
-
-    def _start(self) -> None:
-        with self._lock:
-            self._events.clear()
-        self._pressed_keys.clear()
-        self._started_at = time.monotonic()
-        self._record_button.setText("■ Stop recording")
-        self._status.setText(
-            f"Recording… press the stop hotkey ({describe_hotkey(self._stop_hotkey)}) when done."
-        )
-        self._refresh_timer.start(400)
-        self._recorder = InputRecorder(
-            on_press=self._on_press,
-            on_release=self._on_release,
-            on_move=self._on_move,
-            on_scroll=self._on_scroll,
-            on_button_press=self._on_button_press,
-            on_button_release=self._on_button_release,
-        ).start()
-
-    def _stop(self) -> None:
-        if self._recorder is not None:
-            self._recorder.stop()
-            self._recorder = None
-        self._pressed_keys.clear()
-        self._refresh_timer.stop()
-        self._record_button.setText("● Start recording")
-        if self._status.text().startswith("Recording"):
-            self._status.setText("Recording stopped.")
-        self._refresh_table()
-
-    def accept(self) -> None:
-        self._stop()
-        super().accept()
-
-    def reject(self) -> None:
-        self._stop()
-        super().reject()
-
-    # ------------------------------------------------------------------
-    # Event sinks (called from pynput listener threads)
-    # ------------------------------------------------------------------
-    def _append(self, kind: str, payload: dict) -> None:
-        stamp = time.monotonic() - self._started_at
-        with self._lock:
-            self._events.append((stamp, kind, payload))
-
-    def _on_press(self, name: str) -> None:
-        # Runs on a pynput listener thread -- never touch Qt widgets/timers
-        # here; stopping is requested via the _stop_recording_requested
-        # signal, which is delivered on the GUI thread.
-        canonical = _canonical(name)
-        self._pressed_keys.add(canonical)
-        if self._stop_combo.issubset(self._pressed_keys):
-            self._stop_recording_requested.emit()
-            return
-        self._append("key_down", {"key": canonical})
-
-    def _on_release(self, name: str) -> None:
-        canonical = _canonical(name)
-        self._pressed_keys.discard(canonical)
-        if self._stop_combo.issubset(self._pressed_keys):
-            self._stop_recording_requested.emit()
-            return
-        self._append("key_up", {"key": canonical})
-
-    def _on_move(self, x: int, y: int) -> None:
-        self._append("move", {"x": x, "y": y})
-
-    def _on_scroll(self, amount: int) -> None:
-        self._append("scroll", {"amount": amount})
-
-    def _on_button_press(self, button: str) -> None:
-        x, y = current_mouse_position()
-        self._append("button_down", {"button": button, "x": x, "y": y})
-
-    def _on_button_release(self, button: str) -> None:
-        x, y = current_mouse_position()
-        self._append("button_up", {"button": button, "x": x, "y": y})
-
-    # ------------------------------------------------------------------
-    def _refresh_table(self) -> None:
-        """Show the recorded events, appending only rows that are new.
-
-        The recorder's event list is append-only while recording, so a full
-        rebuild every 400 ms was pure waste (and reset selection/scroll);
-        track how many rows are already displayed and add just the delta.
-        ``setRowCount`` shrinking handles the clear-on-restart case.
-        """
-        with self._lock:
-            events = list(self._events)
-        self._count_label.setText(f"{len(events)} events")
-        scroll_bar = self._table.verticalScrollBar()
-        at_bottom = scroll_bar.value() >= scroll_bar.maximum() - 4
-        existing = self._table.rowCount()
-        if len(events) < existing:
-            self._table.setRowCount(len(events))
-            existing = len(events)
-        for row in range(existing, len(events)):
-            stamp, kind, payload = events[row]
-            self._table.insertRow(row)
-            self._table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
-            self._table.setItem(row, 1, QTableWidgetItem(f"{stamp:.2f}s"))
-            self._table.setItem(row, 2, QTableWidgetItem(_describe_event(kind, payload)))
-        if at_bottom:
-            scroll_bar.setValue(scroll_bar.maximum())
-
-    def actions(self) -> list[ActionConfig]:
-        """Convert the recorded events into a compact action sequence."""
-        with self._lock:
-            events = list(self._events)
-        return _events_to_actions(events)
-
-
-def _describe_event(kind: str, payload: dict) -> str:
-    if kind == "key_down":
-        return f"↓ {payload['key']}"
-    if kind == "key_up":
-        return f"↑ {payload['key']}"
-    if kind == "move":
-        return f"move → ({payload['x']}, {payload['y']})"
-    if kind == "scroll":
-        return f"scroll {payload['amount']:+d}"
-    if kind == "button_down":
-        return f"mouse down ({payload['button']}) at ({payload['x']}, {payload['y']})"
-    if kind == "button_up":
-        return f"mouse up ({payload['button']}) at ({payload['x']}, {payload['y']})"
-    return kind
-
-
-# ----------------------------------------------------------------------
-# Macro editor
-# ----------------------------------------------------------------------
-class MacroEditorDialog(QDialog):
-    """Edit one macro.
-
-    Layout top-to-bottom:
-
-    * **General** -- name, start hotkey and the enabled flag.  Looping is no
-      longer a general setting: add "Loop start" / "Loop end" steps in the
-      Actions table instead (the legacy repeat/loops fields are migrated
-      automatically when an old settings file is loaded).
-      The user turns the macro on and off; there is no separate pause state.
-    * **Actions** -- an ordered table of steps with add/edit/remove/reorder
-      controls plus a whole-session recorder.  The triggers are *actions*:
-      insert a "Stop trigger" step to open a gated stretch and a "Start
-      trigger" step to close it -- everything written between them is held back
-      while the stop-trigger step's screen rule is present on screen.
-    """
-
-    def __init__(
-        self,
-        macro: MacroConfig,
-        parent: QWidget | None = None,
-        stop_hotkey: str = "f8",
-    ) -> None:
-        super().__init__(parent)
-        self._stop_hotkey = stop_hotkey
-        # Preserve identity across edits; stamp a fresh uid for brand-new macros.
-        self._uid = macro.uid or new_macro_uid()
-        self.setWindowTitle(f"Edit macro — {macro.name}")
-        self.setMinimumSize(680, 620)
-
-        # -- general ---------------------------------------------------
-        self._name = QLineEdit(macro.name)
-        self._hotkey = HotkeyButton(macro.start_hotkey)
-        self._enabled = QCheckBox("Enabled (unchecked macros ignore their hotkey and Run clicks)")
-        self._enabled.setChecked(macro.enabled)
-
-        meta_form = QFormLayout()
-        meta_form.addRow("Name:", self._name)
-        meta_form.addRow("Start hotkey:", self._hotkey)
-        meta_form.addRow("", self._enabled)
-        meta_box = QGroupBox("General")
-        meta_box.setLayout(meta_form)
-
-        # -- actions ---------------------------------------------------
-        self._table = QTableWidget(0, 2)
-        self._table.setHorizontalHeaderLabels(["Action", "Details"])
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._table.doubleClicked.connect(self._edit_action)
-
-        toolbar = QHBoxLayout()
-        for text, slot in (
-            ("Add", self._add_action),
-            ("Edit", self._edit_action),
-            ("Remove", self._remove_action),
-            ("Up", lambda: self._move(-1)),
-            ("Down", lambda: self._move(+1)),
-        ):
-            button = QPushButton(text)
-            button.clicked.connect(slot)
-            toolbar.addWidget(button)
-        toolbar.addStretch()
-        record_button = QPushButton("🎥 Record inputs…")
-        record_button.clicked.connect(self._record_inputs)
-        toolbar.addWidget(record_button)
-
-        actions_box = QGroupBox("Actions")
-        actions_layout = QVBoxLayout(actions_box)
-        actions_layout.addLayout(toolbar)
-        actions_layout.addWidget(self._table)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(meta_box)
-        layout.addWidget(actions_box, 1)
-        layout.addWidget(buttons)
-
-        self._actions: list[ActionConfig] = list(macro.actions)
-        self._reload_table()
-
-    # ------------------------------------------------------------------
-    # Action table
-    # ------------------------------------------------------------------
-    @staticmethod
-    def describe(action: ActionConfig) -> tuple[str, str]:
-        """Human-readable (type, details) pair for the action table."""
-        where = "" if action.x is None else f" at ({action.x}, {action.y})"
-        cond = MacroEditorDialog._describe_condition(action)
-        labels = {
-            "key": ("Press key", action.key),
-            "hold_key": ("Hold key", f"{action.key} for {action.duration_ms} ms"),
-            "combo": ("Hotkey combo", action.combo),
-            "type": ("Type text", f'"{action.text}"'),
-            "move": ("Move mouse", f"({action.x}, {action.y})"),
-            "click": ("Click", action.button + where),
-            "double_click": ("Double click", action.button + where),
-            "mouse_down": ("Mouse down", action.button),
-            "mouse_up": ("Mouse up", action.button),
-            "drag": (
-                "Drag",
-                f"{action.button}: ({action.x}, {action.y}) → ({action.amount}, {action.duration_ms})",
-            ),
-            "scroll": ("Scroll", str(action.amount)),
-            "wait": ("Wait", f"{action.duration_ms} ms"),
-            "wait_for": ("Wait until", cond),
-            "stop_trigger": ("Stop trigger", cond),
-            "start_trigger": ("Start trigger", cond),
-            "loop_start": (
-                "Loop start",
-                f"forever, {action.duration_ms} ms delay"
-                if action.duration_ms
-                else "forever",
-            ),
-            "loop_end": (
-                "Loop end",
-                f"{action.duration_ms} ms delay" if action.duration_ms else "",
-            ),
-        }
-        return labels.get(action.kind, (action.kind, ""))
-
-    @staticmethod
-    def _describe_condition(action: ActionConfig) -> str:
-        """Short summary of a flow action's screen rule for the table."""
-        condition = action.condition
-        if condition is None or not condition.configured:
-            return "no rule configured"
-        parts = [condition.description]
-        # The give-up timeout only means something for wait_for; drag steps
-        # reuse duration_ms as the end Y coordinate and must not be mislabeled.
-        if action.duration_ms and action.kind == "wait_for":
-            parts.append(f"gives up after {action.duration_ms} ms")
-        return ", ".join(part for part in parts if part) or "rule configured"
-
-    def _reload_table(self) -> None:
-        self._table.setRowCount(len(self._actions))
-        for row, action in enumerate(self._actions):
-            name, details = self.describe(action)
-            self._table.setItem(row, 0, QTableWidgetItem(name))
-            self._table.setItem(row, 1, QTableWidgetItem(details))
-
-    def _selected_row(self) -> int:
-        return self._table.currentRow()
-
-    def _add_action(self) -> None:
-        dialog = ActionEditorDialog(parent=self)
-        if dialog.exec():
-            self._actions.append(dialog.action())
-            self._reload_table()
-
-    def _edit_action(self) -> None:
-        row = self._selected_row()
-        if row < 0:
-            return
-        dialog = ActionEditorDialog(self._actions[row], parent=self)
-        if dialog.exec():
-            self._actions[row] = dialog.action()
-            self._reload_table()
-
-    def _remove_action(self) -> None:
-        row = self._selected_row()
-        if row >= 0:
-            del self._actions[row]
-            self._reload_table()
-
-    def _move(self, delta: int) -> None:
-        row = self._selected_row()
-        target = row + delta
-        if 0 <= row < len(self._actions) and 0 <= target < len(self._actions):
-            self._actions[row], self._actions[target] = self._actions[target], self._actions[row]
-            self._reload_table()
-            self._table.selectRow(target)
-
-    def _record_inputs(self) -> None:
-        dialog = MacroRecorderDialog(stop_hotkey=self._stop_hotkey, parent=self)
-        if dialog.exec():
-            recorded = dialog.actions()
-            if recorded:
-                self._actions.extend(recorded)
-                self._reload_table()
-
-    # ------------------------------------------------------------------
-    def macro(self) -> MacroConfig:
-        """Build the :class:`MacroConfig` described by this dialog.
-
-        Looping lives entirely in the action list now (``loop_start`` /
-        ``loop_end`` steps), so the legacy repeat/loops/interval fields are
-        left at their neutral defaults.
-        """
-        return MacroConfig(
-            name=self._name.text().strip() or "Unnamed macro",
-            start_hotkey=self._hotkey.hotkey,
-            actions=tuple(self._actions),
-            uid=self._uid,
-            enabled=self._enabled.isChecked(),
-        )

@@ -30,13 +30,16 @@ project/
 
 1. **Features are directories under `src/components/`.** Existing features:
    `macro/`, `playback/`, `input/`, `screen_watch/`, `capture/`,
-   `condition_editor.py`, `macro_editor.py`, `macro_list_tab.py`,
-   `settings_tab.py`, `ui/`.
+   `macro_editor/` (the editor dialogs package), `condition_editor.py`,
+   `macro_list_tab.py`, `settings_tab.py`, `ui/`.
    - A multi-module feature gets its own package dir with an `__init__.py`
-     that re-exports the public API (see `components/input/__init__.py`).
+     that re-exports the public API (see `components/input/__init__.py` and
+     `components/macro_editor/__init__.py`).
    - A single-file Qt tab/dialog may live directly in `components/` until it
      grows past ~one screen of responsibilities — then split it into a
-     feature package (`editor/`) and move the pieces. Do not half-migrate.
+     feature package and move the pieces (`macro_editor/` is the worked
+     example, split out of a former 1232-line single file). Do not
+     half-migrate.
 2. **`components/ui/` is leaf-tier:** generic widgets with no feature logic.
    Feature tabs import *from* `ui/`, never the reverse (beyond the small
    display helpers already living in `widgets.py`).

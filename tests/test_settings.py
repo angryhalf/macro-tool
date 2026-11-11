@@ -285,3 +285,47 @@ def test_uid_rename_detection_end_to_end():
     names = {m.uid: m.name for m in after.macros}
     assert names[fresh.uid] == "Fresh"
     assert names[keep.uid] == "Keep"
+
+
+def test_condition_event_and_all_regions_round_trip(tmp_path):
+    """Input/action-source rules and multi-region watches survive save/load.
+
+    The condition editor only edits the screen subset of a rule, so the
+    store must be the guarantee that ``event`` (rule source) and
+    ``all_regions`` (extra watched rectangles) persist untouched -- see
+    docs/architecture-review-2026-11-11.md, candidate 1.
+    """
+    path = tmp_path / "settings.json"
+    input_rule = ScreenCondition(event="key:a", poll_interval_ms=250)
+    multi_region = ScreenCondition(
+        mode="image_found",
+        template_path="t.png",
+        region=(0, 0, 100, 100),
+        all_regions=((100, 0, 50, 50), (200, 0, 25, 25)),
+    )
+    settings = AppSettings(
+        macros=(
+            MacroConfig(
+                name="Rules",
+                uid=new_macro_uid(),
+                actions=(
+                    ActionConfig(kind="wait_for", condition=input_rule),
+                    ActionConfig(kind="stop_trigger", condition=multi_region),
+                ),
+            ),
+        )
+    )
+    save_settings(settings, path)
+    loaded = load_settings(path)
+
+    macro = loaded.macros[0]
+    wait_for, stop_trigger = macro.actions
+    assert wait_for.condition == input_rule
+    assert wait_for.condition.source == "input"
+    assert wait_for.condition.target == "a"
+    assert stop_trigger.condition == multi_region
+    assert stop_trigger.condition.watch_regions == [
+        (0, 0, 100, 100),
+        (100, 0, 50, 50),
+        (200, 0, 25, 25),
+    ]

@@ -10,7 +10,7 @@ Two tiers, strict direction of reuse:
 - `src/components/ui/` — **generic widgets** (hotkey button, small helpers).
   Feature-agnostic, safe to import everywhere.
 - `src/components/<feature>.py` or feature package — **tabs & dialogs**
-  (`macro_list_tab.py`, `settings_tab.py`, `macro_editor.py`,
+  (`macro_list_tab.py`, `settings_tab.py`, `macro_editor/` package,
   `condition_editor.py`). Wired together only by `app/main_window.py`
   (composition root).
 

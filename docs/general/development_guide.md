@@ -37,6 +37,7 @@ All tests are **headless** — no display, no real input synthesis:
 | `tests/test_settings.py` | store round-trip, migrations, export/import sanitisation | tmp_path instead of real data dir |
 | `tests/test_screen_conditions.py` | vision helpers, condition parsing/matching logic | synthetic numpy images |
 | `tests/test_engine_loops_triggers.py` | loops, wait_for, stop/start triggers, input/action rules, cancellation | monkeypatched `ConditionRuntime.evaluate` + `macro_engine.perform_action` |
+| `tests/test_recording.py` | recorded events → actions conversion (press/hold, click/drag folding, waits) | pure `events_to_actions`, synthetic event streams |
 
 Conventions when adding tests:
 
@@ -61,7 +62,8 @@ Conventions when adding tests:
    kinds, or in `synthesis.perform_action` for input kinds. Respect the
    blocked-flag bypass rule for flow steps.
 4. **UI**: entry in the editor's kind list + parameter widget
-   (`macro_editor.py`), label via `input/naming.py` if user-visible.
+   (`macro_editor/action_editor.py`), label via `common/events.py` if
+   user-visible.
 5. **Docs**: table row in `docs/macros/macro_model.md`.
 6. **Tests**: round-trip in `test_settings.py`, behaviour in
    `test_engine_loops_triggers.py`.

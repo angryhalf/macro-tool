@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
+from components.playback import condition_monitor
 from components.playback.condition_runtime import ConditionRuntime
 from components.playback.token import ExecutionToken, MacroStats
 from components.macro.condition import ScreenCondition
@@ -77,14 +78,6 @@ class MacroRunner:
             kind = action.kind
             condition = action.condition
             has_rule = condition is not None and condition.configured
-            if kind not in ("loop_start", "loop_end", "wait_for", "stop_trigger", "start_trigger"):
-                # Normal action: fires only while no trigger rule holds it back.
-                # Flow markers (wait_for / stop_trigger / start_trigger) are
-                # never held back by the very rules they arm or close -- a
-                # marker blocked by its own rule would deadlock the run.
-                token.wait_while_blocked()
-                if token.cancelled:
-                    return False
             if kind == "wait_for":
                 if not self._await_condition(condition, token):
                     return False
@@ -270,25 +263,9 @@ class MacroRunner:
     @staticmethod
     def _apply_rule_states(token: ExecutionToken) -> None:
         """Re-evaluate every armed rule and store its blocking state."""
-        # Imported lazily: the monitor module imports nothing from here, but
-        # keeping the dependency one-way documents the layering.
-        from components.playback.condition_monitor import rule_blocks_now
-
         with token.rules_lock:
             for entry in token.blocked_rules:
-                entry["_blocking"] = rule_blocks_now(entry)
-
-    @staticmethod
-    def _first_blocking_reason(token: ExecutionToken) -> str | None:
-        """Human-readable name of the rule currently holding actions back."""
-        with token.rules_lock:
-            for entry in token.blocked_rules:
-                if not entry.get("_blocking"):
-                    continue
-                condition = entry.get("condition")
-                mode = entry.get("mode", "?")
-                return condition.description if condition is not None else f"{mode} hold"
-        return None
+                entry["_blocking"] = condition_monitor.rule_blocks_now(entry)
 
     def _record_token_block(self, token: ExecutionToken) -> None:
         """Publish the rule that currently blocks *token* into its stats.
@@ -299,7 +276,7 @@ class MacroRunner:
         """
         if token.macro is None:
             return
-        reason = self._first_blocking_reason(token)
+        reason = condition_monitor.first_blocking_reason(token)
         record = getattr(self._engine, "record_block_reason", None)
         if record is not None:
             record(token, reason)

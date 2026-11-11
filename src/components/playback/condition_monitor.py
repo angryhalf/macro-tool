@@ -94,6 +94,24 @@ def evaluate_once(condition: ScreenCondition) -> bool:
         return False
 
 
+def first_blocking_reason(token: ExecutionToken) -> str | None:
+    """Human-readable name of the rule currently holding actions back.
+
+    Used by both the worker (via ``MacroRunner._record_token_block``) and the
+    monitor loop (via ``MacroEngine._record_token_block``) to publish the
+    "blocked_by" stat -- it lives here because this module owns the armed
+    rule-entry semantics.
+    """
+    with token.rules_lock:
+        for entry in token.blocked_rules:
+            if not entry.get("_blocking"):
+                continue
+            condition = entry.get("condition")
+            mode = entry.get("mode", "?")
+            return condition.description if condition is not None else f"{mode} hold"
+    return None
+
+
 def monitor_token(token: ExecutionToken, record_block: object | None = None) -> bool:
     """Re-evaluate one macro's armed rules; True when triggers flipped.
 

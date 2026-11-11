@@ -82,6 +82,13 @@ class ConditionEditor(QWidget):
         super().__init__(parent)
         self._template_path = ""
         self._region: tuple[int, int, int, int] | None = None
+        # Fields this editor does not expose but must preserve across a
+        # load()/build() round-trip: the rule source (input/action events)
+        # and any extra watched rectangles beyond the primary ``region``.
+        # Dropping them would silently rewrite a rule's semantics on every
+        # edit (see docs/architecture-review-2026-11-11.md, candidate 1).
+        self._event: str = ""
+        self._all_regions: tuple[tuple[int, int, int, int], ...] = ()
 
         self.mode_combo = QComboBox()
         for label, mode in MODE_LABELS.items():
@@ -167,6 +174,13 @@ class ConditionEditor(QWidget):
         self.timeout_label.setVisible(show_timeout)
         self.timeout_spin.setVisible(show_timeout)
         form.addRow("Watched region:", region_row)
+        # Note: rows are addressed by index below (``_color_only_rows``), so
+        # new rows must only ever be appended after the region row.
+        self._source_note = QLabel("")
+        self._source_note.setWordWrap(True)
+        self._source_note.setStyleSheet("color: gray;")
+        self._source_note.setVisible(False)
+        form.addRow(self._source_note)
         # Rows that only make sense for the colour modes (target colour,
         # picker buttons, tolerance, required area): hide them wholesale --
         # label included -- whenever another mode is selected.
@@ -183,8 +197,16 @@ class ConditionEditor(QWidget):
         self.timeout_spin.setVisible(visible)
 
     def load(self, condition: ScreenCondition | None) -> None:
-        """Populate the form from *condition* (``None`` resets to defaults)."""
+        """Populate the form from *condition* (``None`` resets to defaults).
+
+        Rule fields this form does not edit (``event``, ``all_regions``) are
+        remembered here and re-emitted by :meth:`build`, so editing a
+        condition can never silently downgrade an input/action rule to a
+        screen rule or shrink a multi-region watch.
+        """
         condition = condition or ScreenCondition()
+        self._event = condition.event
+        self._all_regions = condition.all_regions
         index = self.mode_combo.findData(condition.mode)
         self.mode_combo.setCurrentIndex(max(0, index))
         self._template_path = condition.template_path
@@ -198,19 +220,26 @@ class ConditionEditor(QWidget):
         self.timeout_spin.setValue(condition.timeout_ms)
         self._region = condition.region
         self._update_region_label()
+        self._update_source_note()
         self._sync_color_swatch()
         self._update_visibility()
 
     def build(self) -> ScreenCondition:
-        """Return the condition currently described by the form."""
+        """Return the condition currently described by the form.
+
+        Fields the form does not expose come back exactly as they were
+        loaded (``event``, ``all_regions``): the round trip is lossless.
+        """
         return ScreenCondition(
             mode=self.mode_combo.currentData(),
+            event=self._event,
             template_path=self._template_path,
             confidence=self.confidence_spin.value(),
             change_threshold=self.change_threshold.value(),
             poll_interval_ms=self.poll_interval.value(),
             timeout_ms=self.timeout_spin.value(),
             region=self._region or _screen_size(),
+            all_regions=self._all_regions,
             color_hex=_normalize_hex(self.color_hex_edit.text()),
             color_tolerance=self.color_tolerance_spin.value(),
             color_ratio=self.color_ratio_spin.value(),
@@ -218,6 +247,8 @@ class ConditionEditor(QWidget):
 
     def clear(self) -> None:
         """Reset to a blank, unconfigured condition."""
+        self._event = ""
+        self._all_regions = ()
         self.load(ScreenCondition(template_path=""))
         self._template_path = ""
         self.template_label.setText("No template selected")
@@ -338,6 +369,35 @@ class ConditionEditor(QWidget):
         else:
             left, top, width, height = self._region
             self.region_label.setText(f"{left},{top} — {width}×{height}")
+        if self._all_regions:
+            self.region_label.setText(
+                f"{self.region_label.text()} (+{len(self._all_regions)} more region"
+                f"{'' if len(self._all_regions) == 1 else 's'})"
+            )
+
+    def _update_source_note(self) -> None:
+        """Tell the user when the rule does not actually watch the screen.
+
+        Input/action-source rules are fully supported by the engine but not
+        editable here; the note says what is preserved instead of quietly
+        showing screen fields for a rule that reacts to user input or to
+        another action executing.
+        """
+        if not self._event:
+            self._source_note.setText("")
+            self._source_note.setVisible(False)
+            return
+        if self._event == "wheel":
+            what = "user scrolls"
+        elif self._event.startswith(("mouse:", "key:")):
+            what = f"user input '{self._event}'"
+        else:
+            what = f"action '{self._event}'"
+        self._source_note.setText(
+            f"This rule watches {what}, not the screen — the fields above are "
+            "preserved unchanged when saving."
+        )
+        self._source_note.setVisible(True)
 
     def _capture_template(self) -> None:
         TEMPLATES_DIR.mkdir(exist_ok=True)
